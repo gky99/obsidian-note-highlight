@@ -1,0 +1,403 @@
+/**
+ * The "aside" panel (Design.md §7.3): a right-sidebar {@link ItemView} that
+ * lists one card per annotation for the active source note.
+ *
+ * The view is intentionally dumb about *which* file is active — the plugin
+ * drives that by calling {@link MarginaliaAsideView.setSourceFile} on
+ * `file-open`. The view re-renders from the store on demand and also subscribes
+ * to `store.onChange` so edits made elsewhere (e.g. the editor) keep the cards
+ * in sync (§4.6: orphans are always surfaced, never silently dropped).
+ *
+ * Rendering never throws: a single bad annotation must not blank the panel.
+ */
+import {
+  ItemView,
+  MarkdownRenderer,
+  TFile,
+  debounce,
+  setIcon,
+  type WorkspaceLeaf,
+  type App,
+} from 'obsidian';
+
+import type { AnnotationStore, ResolvedAnnotation } from '@/store/store';
+import type { MarginaliaSettings } from '@/settings';
+import { renderColor, colorLabel, normalizeColorValue } from '@/color';
+
+/** Stable view type for `registerView` / `getViewType`. */
+export const ASIDE_VIEW_TYPE = 'marginalia-aside';
+
+/** How long the reverse-nav pulse stays lit before it fades (ms). */
+const PULSE_MS = 1200;
+
+/** Debounce window for comment writes so we don't write per keystroke (ms). */
+const COMMENT_DEBOUNCE_MS = 600;
+
+export interface AsideDeps {
+  app: App;
+  store: AnnotationStore;
+  settings: MarginaliaSettings;
+  /** Forward jump (navigation.jumpToAnnotation, already implemented in the plugin). */
+  jumpTo: (sourcePath: string, id: string) => void | Promise<void>;
+}
+
+export class MarginaliaAsideView extends ItemView {
+  private readonly deps: AsideDeps;
+  /** Source note whose annotations are currently shown (null = nothing). */
+  private sourcePath: string | null = null;
+  /** Unsubscribe handle for the store change listener (set in onOpen). */
+  private unsubscribe: (() => void) | null = null;
+  /** Pending pulse timers keyed by annotation id, so we can clear on re-render. */
+  private pulseTimers = new Map<string, number>();
+  /** The open color-picker popup (if any) and its teardown, so we can dismiss it. */
+  private colorPopup: HTMLElement | null = null;
+  private colorPopupCleanup: (() => void) | null = null;
+
+  constructor(leaf: WorkspaceLeaf, deps: AsideDeps) {
+    super(leaf);
+    this.deps = deps;
+  }
+
+  getViewType(): string {
+    return ASIDE_VIEW_TYPE;
+  }
+
+  getDisplayText(): string {
+    return 'Annotations';
+  }
+
+  getIcon(): string {
+    return 'highlighter';
+  }
+
+  protected async onOpen(): Promise<void> {
+    // Keep cards in sync when the active file's annotations change anywhere.
+    this.unsubscribe = this.deps.store.onChange((changedPath) => {
+      if (changedPath === this.sourcePath) this.refresh();
+    });
+    this.render();
+  }
+
+  protected async onClose(): Promise<void> {
+    this.unsubscribe?.();
+    this.unsubscribe = null;
+    this.clearPulseTimers();
+    this.closeColorPopup();
+  }
+
+  /** Point the panel at a source file (path) and re-render its cards; null clears. */
+  async setSourceFile(path: string | null): Promise<void> {
+    this.sourcePath = path;
+    if (path) {
+      const file = this.deps.app.vault.getAbstractFileByPath(path);
+      // Lazy-load: the store re-resolves and emits, but render from the result.
+      if (file instanceof TFile) {
+        try {
+          await this.deps.store.load(file);
+        } catch {
+          // Render whatever is cached; load failures are surfaced via Notice in the store.
+        }
+      }
+    }
+    this.render();
+  }
+
+  /** Re-render from the store (call on store onChange for the active file). */
+  refresh(): void {
+    // Don't yank a comment textarea out from under an in-progress edit. The
+    // debounced write triggers store reload → onChange → refresh; re-rendering
+    // mid-typing would destroy the focused element and lose the caret. The
+    // committing blur repaints the comment itself, so we lose nothing.
+    if (this.isEditing()) return;
+    this.render();
+  }
+
+  /** Is a comment textarea currently focused inside this panel? */
+  private isEditing(): boolean {
+    const active = this.contentEl.ownerDocument.activeElement;
+    return active instanceof HTMLTextAreaElement && this.contentEl.contains(active);
+  }
+
+  // --- reverse navigation -------------------------------------------------
+
+  /** Scroll the card into view and focus it (e.g. when its highlight is clicked). */
+  revealCard(id: string): void {
+    const card = this.cardEl(id);
+    if (!card) return;
+    card.scrollIntoView({ block: 'nearest' });
+    card.addClass('mrg-active');
+  }
+
+  /** Reverse-nav: briefly emphasize the card for an annotation. */
+  pulseCard(id: string): void {
+    const card = this.cardEl(id);
+    if (!card) return;
+    card.scrollIntoView({ block: 'nearest' });
+    card.addClass('mrg-active');
+    const existing = this.pulseTimers.get(id);
+    if (existing !== undefined) window.clearTimeout(existing);
+    const timer = window.setTimeout(() => {
+      this.pulseTimers.delete(id);
+      this.cardEl(id)?.removeClass('mrg-active');
+    }, PULSE_MS);
+    this.pulseTimers.set(id, timer);
+  }
+
+  // --- rendering ----------------------------------------------------------
+
+  private cardEl(id: string): HTMLElement | null {
+    return this.contentEl.querySelector<HTMLElement>(`[data-anno-id="${cssEscape(id)}"]`);
+  }
+
+  private clearPulseTimers(): void {
+    for (const timer of this.pulseTimers.values()) window.clearTimeout(timer);
+    this.pulseTimers.clear();
+  }
+
+  /** Full re-render of the panel. Never throws. */
+  private render(): void {
+    this.clearPulseTimers();
+    this.closeColorPopup(); // a stale popup would point at a destroyed card
+    const root = this.contentEl;
+    root.empty();
+    const aside = root.createDiv({ cls: 'mrg-aside' });
+
+    const path = this.sourcePath;
+    const resolved = path ? this.deps.store.getResolved(path) : [];
+
+    if (!path || resolved.length === 0) {
+      aside.createDiv({
+        cls: 'mrg-aside-empty',
+        text: 'No annotations for this note.',
+      });
+      return;
+    }
+
+    for (const item of resolved) {
+      try {
+        this.renderCard(aside, path, item);
+      } catch {
+        // A single malformed annotation must not blank the whole panel.
+      }
+    }
+  }
+
+  private renderCard(parent: HTMLElement, sourcePath: string, item: ResolvedAnnotation): void {
+    const { annotation, result } = item;
+    const orphaned = result.status === 'orphaned';
+    const color = normalizeColorValue(annotation.record.color);
+
+    const card = parent.createDiv({ cls: 'mrg-card' });
+    paintCardColor(card, color);
+    card.dataset.annoId = annotation.id;
+    if (orphaned) card.addClass('mrg-orphaned');
+
+    // Clicking the card jumps to the highlight — except on the interactive
+    // controls (comment editor, color dropdown), which handle their own clicks.
+    card.addEventListener('click', (e) => {
+      const target = e.target;
+      if (target instanceof Element && target.closest('.mrg-card-comment, .mrg-card-footer')) {
+        return;
+      }
+      void this.deps.jumpTo(sourcePath, annotation.id);
+    });
+
+    // Quote — newlines preserved (CSS: white-space: pre-wrap).
+    card.createDiv({ cls: 'mrg-card-quote', text: annotation.quote });
+
+    // Comment — rendered markdown that swaps to a textarea on click.
+    this.renderComment(card, sourcePath, annotation.id, annotation.comment);
+
+    // Footer: color button · status · delete.
+    const footer = card.createDiv({ cls: 'mrg-card-footer' });
+    this.renderColorControl(footer, sourcePath, annotation.id, color);
+    this.renderStatus(footer, result);
+    this.renderDeleteButton(footer, sourcePath, annotation.id);
+  }
+
+  private renderComment(
+    card: HTMLElement,
+    sourcePath: string,
+    id: string,
+    comment: string,
+  ): void {
+    const view = card.createDiv({ cls: 'mrg-card-comment' });
+    view.setAttribute('role', 'textbox');
+    view.setAttribute('tabindex', '0');
+    this.paintComment(view, sourcePath, comment);
+
+    const beginEdit = (): void => {
+      view.empty();
+      const ta = view.createEl('textarea', { cls: 'mrg-card-comment-input' });
+      ta.value = comment;
+      ta.rows = Math.max(2, comment.split('\n').length);
+      ta.focus();
+
+      // Debounced live write; flush on blur. Both go through the store, which
+      // reloads + emits — the resulting onChange triggers a re-render.
+      const write = debounce(
+        (value: string) => {
+          void this.deps.store.updateComment(sourcePath, id, value);
+        },
+        COMMENT_DEBOUNCE_MS,
+        true,
+      );
+      ta.addEventListener('input', () => write(ta.value));
+      ta.addEventListener('blur', () => {
+        write.cancel();
+        const next = ta.value;
+        if (next !== comment) {
+          comment = next;
+          void this.deps.store.updateComment(sourcePath, id, next);
+        }
+        this.paintComment(view, sourcePath, next);
+      });
+      // Cmd/Ctrl+Enter commits (blurs) the edit.
+      ta.addEventListener('keydown', (e) => {
+        if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+          e.preventDefault();
+          ta.blur();
+        }
+      });
+    };
+
+    view.addEventListener('click', () => {
+      // Don't restart an edit if a textarea is already mounted.
+      if (!view.querySelector('textarea')) beginEdit();
+    });
+  }
+
+  /** Render the comment as markdown (or the empty placeholder via CSS :empty). */
+  private paintComment(view: HTMLElement, sourcePath: string, comment: string): void {
+    view.empty();
+    if (comment.trim().length === 0) return; // CSS :empty shows the placeholder.
+    void MarkdownRenderer.render(this.deps.app, comment, view, sourcePath, this);
+  }
+
+  /**
+   * A single swatch button showing the current color; clicking it opens a popup
+   * of palette swatches to pick from (no separate icon or native dropdown).
+   */
+  private renderColorControl(
+    footer: HTMLElement,
+    sourcePath: string,
+    id: string,
+    current: string,
+  ): void {
+    const button = footer.createEl('button', {
+      cls: 'mrg-color-button',
+      attr: { type: 'button', 'aria-label': `Highlight color: ${colorLabel(current)}` },
+      title: `Color: ${colorLabel(current)}`,
+    });
+    button.style.backgroundColor = renderColor(current).solid;
+    button.addEventListener('click', (e) => {
+      e.stopPropagation(); // don't trigger the card's jump handler
+      this.openColorPopup(button, sourcePath, id, current);
+    });
+  }
+
+  /** Float a palette of swatches under the color button; pick one to recolor. */
+  private openColorPopup(
+    anchor: HTMLElement,
+    sourcePath: string,
+    id: string,
+    current: string,
+  ): void {
+    this.closeColorPopup();
+    const doc = this.contentEl.ownerDocument;
+    const popup = doc.body.createDiv({ cls: 'mrg-color-popup' });
+    popup.setAttribute('role', 'listbox');
+
+    for (const color of this.colorOptions(current)) {
+      const option = popup.createEl('button', {
+        cls: 'mrg-color-option',
+        attr: { type: 'button', 'aria-label': colorLabel(color) },
+        title: colorLabel(color),
+      });
+      option.style.backgroundColor = renderColor(color).solid;
+      if (color === current) option.addClass('mrg-selected');
+      option.addEventListener('click', () => {
+        this.closeColorPopup();
+        if (color !== current) void this.deps.store.updateColor(sourcePath, id, color);
+      });
+    }
+
+    positionPopup(popup, anchor);
+
+    const onPointerDown = (e: MouseEvent): void => {
+      const t = e.target;
+      if (t instanceof Node && (popup.contains(t) || anchor.contains(t))) return;
+      this.closeColorPopup();
+    };
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') this.closeColorPopup();
+    };
+    doc.addEventListener('mousedown', onPointerDown);
+    doc.addEventListener('keydown', onKey);
+
+    this.colorPopup = popup;
+    this.colorPopupCleanup = (): void => {
+      doc.removeEventListener('mousedown', onPointerDown);
+      doc.removeEventListener('keydown', onKey);
+    };
+  }
+
+  private closeColorPopup(): void {
+    this.colorPopupCleanup?.();
+    this.colorPopupCleanup = null;
+    this.colorPopup?.remove();
+    this.colorPopup = null;
+  }
+
+  /** Palette colors to offer, with the current value guaranteed present. */
+  private colorOptions(current: string): string[] {
+    const palette = this.deps.settings.palette;
+    return palette.includes(current) ? palette : [current, ...palette];
+  }
+
+  private renderStatus(footer: HTMLElement, result: ResolvedAnnotation['result']): void {
+    const text = result.status === 'anchored' ? result.method : 'orphaned';
+    footer.createSpan({ cls: 'mrg-card-status', text });
+  }
+
+  /** A trash-icon button that deletes the annotation from the sidecar. */
+  private renderDeleteButton(footer: HTMLElement, sourcePath: string, id: string): void {
+    const button = footer.createEl('button', {
+      cls: 'mrg-delete-button',
+      attr: { type: 'button', 'aria-label': 'Delete annotation' },
+      title: 'Delete annotation',
+    });
+    setIcon(button, 'trash-2');
+    button.addEventListener('click', (e) => {
+      e.stopPropagation(); // don't trigger the card's jump handler
+      void this.deps.store.deleteAnnotation(sourcePath, id);
+    });
+  }
+}
+
+// --- pure helpers (no obsidian runtime) -----------------------------------
+
+/** Apply a color (built-in token or hex) to a card's left border. */
+function paintCardColor(card: HTMLElement, color: string): void {
+  const render = renderColor(color);
+  if (render.className) card.addClass(render.className);
+  else card.style.borderLeftColor = render.solid;
+}
+
+/** Place a fixed-position popup just below `anchor`, clamped to the viewport. */
+function positionPopup(popup: HTMLElement, anchor: HTMLElement): void {
+  const GAP = 4;
+  const a = anchor.getBoundingClientRect();
+  const p = popup.getBoundingClientRect();
+  const left = Math.max(GAP, Math.min(a.left, window.innerWidth - p.width - GAP));
+  let top = a.bottom + GAP;
+  if (top + p.height > window.innerHeight - GAP) top = a.top - p.height - GAP;
+  popup.style.left = `${Math.round(left)}px`;
+  popup.style.top = `${Math.round(Math.max(GAP, top))}px`;
+}
+
+/** Escape a string for safe use inside an attribute-selector `[..="x"]`. */
+function cssEscape(value: string): string {
+  const esc = (globalThis as { CSS?: { escape?: (s: string) => string } }).CSS?.escape;
+  return esc ? esc(value) : value.replace(/["\\]/g, '\\$&');
+}

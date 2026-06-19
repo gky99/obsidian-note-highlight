@@ -1,0 +1,17 @@
+{
+  "sidecarSuffix": ".annotations",
+  "sidecarFolder": "",
+  "defaultColor": "yellow",
+  "palette": [
+    "yellow",
+    "green",
+    "blue",
+    "pink",
+    "orange",
+    "#576aff"
+  ],
+  "fuzzyThreshold": 0.7,
+  "contextChars": 30,
+  "revealAnnoOnCursor": true,
+  "autoOpenAside": true
+}

@@ -1,0 +1,264 @@
+/* ==========================================================================
+   Marginalia — plugin styles
+   Class-name contract reused by the editor extension, reading-mode renderer,
+   and the aside panel. Colors lean on Obsidian theme variables so highlights
+   stay legible in light and dark themes.
+   ========================================================================== */
+
+:root {
+  --mrg-yellow: rgba(255, 214, 10, 0.35);
+  --mrg-yellow-border: rgba(214, 178, 0, 0.9);
+  --mrg-green: rgba(52, 199, 89, 0.28);
+  --mrg-green-border: rgba(40, 160, 70, 0.9);
+  --mrg-blue: rgba(10, 132, 255, 0.24);
+  --mrg-blue-border: rgba(10, 110, 220, 0.9);
+  --mrg-pink: rgba(255, 55, 95, 0.22);
+  --mrg-pink-border: rgba(220, 40, 90, 0.9);
+  --mrg-orange: rgba(255, 149, 0, 0.28);
+  --mrg-orange-border: rgba(220, 120, 0, 0.9);
+}
+
+/* --- Highlights (editor + reading mode) ---------------------------------- */
+
+.mrg-highlight {
+  border-radius: 2px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  padding: 0.05em 0;
+  cursor: pointer;
+  transition: background-color 120ms ease;
+  background-color: var(--mrg-yellow);
+}
+
+.mrg-highlight.mrg-color-yellow { background-color: var(--mrg-yellow); }
+.mrg-highlight.mrg-color-green  { background-color: var(--mrg-green); }
+.mrg-highlight.mrg-color-blue   { background-color: var(--mrg-blue); }
+.mrg-highlight.mrg-color-pink   { background-color: var(--mrg-pink); }
+.mrg-highlight.mrg-color-orange { background-color: var(--mrg-orange); }
+
+/* Cursor/selection landed inside a highlight (reverse-nav pulse target). */
+.mrg-highlight.mrg-active {
+  outline: 1px solid var(--mrg-yellow-border);
+}
+
+/* Transient flash applied after a forward jump (§8.1). */
+.mrg-flash {
+  animation: mrg-flash 1.1s ease-out 1;
+}
+
+@keyframes mrg-flash {
+  0%   { background-color: var(--text-highlight-bg, var(--mrg-yellow)); }
+  100% { background-color: transparent; }
+}
+
+/* --- Hidden `anno` machine block (§4.4, §7.1–§7.2) ----------------------- */
+
+/* Reading mode: the code-block processor renders a tiny inert marker. */
+.mrg-anno-marker {
+  display: inline-block;
+  width: 0.7em;
+  height: 0.7em;
+  margin: 0 0.15em;
+  border-radius: 50%;
+  background: var(--text-faint);
+  opacity: 0.5;
+  cursor: default;
+  vertical-align: middle;
+}
+
+/* Live Preview: collapsed replacement widget for the anno block. */
+.mrg-anno-collapsed {
+  display: inline-block;
+  color: var(--text-faint);
+  font-size: 0.8em;
+  opacity: 0.6;
+  user-select: none;
+}
+
+/* --- Aside panel (§7.3) -------------------------------------------------- */
+
+.mrg-aside {
+  padding: 8px 10px;
+  overflow-y: auto;
+  height: 100%;
+}
+
+.mrg-aside-empty {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  padding: 16px 8px;
+  text-align: center;
+}
+
+.mrg-card {
+  border: 1px solid var(--background-modifier-border);
+  border-left: 3px solid var(--mrg-yellow-border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  background: var(--background-secondary);
+}
+
+.mrg-card.mrg-color-green  { border-left-color: var(--mrg-green-border); }
+.mrg-card.mrg-color-blue   { border-left-color: var(--mrg-blue-border); }
+.mrg-card.mrg-color-pink   { border-left-color: var(--mrg-pink-border); }
+.mrg-card.mrg-color-orange { border-left-color: var(--mrg-orange-border); }
+
+.mrg-card.mrg-active {
+  box-shadow: 0 0 0 2px var(--interactive-accent);
+}
+
+.mrg-card.mrg-orphaned {
+  border-left-color: var(--text-error);
+  opacity: 0.85;
+}
+
+.mrg-card-quote {
+  font-style: italic;
+  color: var(--text-normal);
+  border-left: 2px solid var(--background-modifier-border);
+  padding-left: 8px;
+  margin-bottom: 6px;
+  white-space: pre-wrap;
+  cursor: pointer; /* clicking the card jumps to the highlight */
+}
+
+.mrg-card-comment {
+  font-size: var(--font-ui-small);
+  color: var(--text-normal);
+}
+
+.mrg-card-comment:empty::before {
+  content: 'Add a comment…';
+  color: var(--text-faint);
+}
+
+/* The inline comment editor spans the full card width. */
+.mrg-card-comment-input {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  font-family: inherit;
+  font-size: var(--font-ui-small);
+}
+
+.mrg-card-footer {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.mrg-card-status {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  margin-left: auto;
+}
+
+.mrg-card.mrg-orphaned .mrg-card-status {
+  color: var(--text-error);
+}
+
+/* Color control: one swatch button showing the current color. */
+.mrg-color-button {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--background-modifier-border);
+  cursor: pointer;
+  box-shadow: none;
+  flex: 0 0 auto;
+}
+
+/* Popup palette opened by the color button. */
+.mrg-color-popup {
+  position: fixed;
+  z-index: var(--layer-popover, 30);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  max-width: 168px;
+  padding: 6px;
+  border-radius: 7px;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  box-shadow: var(--shadow-s, 0 2px 8px rgba(0, 0, 0, 0.25));
+}
+
+.mrg-color-option {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--background-modifier-border);
+  cursor: pointer;
+  box-shadow: none;
+  transition: transform 80ms ease;
+}
+
+.mrg-color-option:hover {
+  transform: scale(1.15);
+}
+
+.mrg-color-option.mrg-selected {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 1px;
+}
+
+/* Delete button: an unobtrusive trash icon that reddens on hover. */
+.mrg-delete-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+  color: var(--text-muted);
+  background: transparent;
+  box-shadow: none;
+  cursor: pointer;
+}
+
+.mrg-delete-button:hover {
+  color: var(--text-error);
+}
+
+/* --- Selection toolbar (§8.2): floats next to a non-empty editor selection. */
+
+.mrg-selection-toolbar {
+  position: fixed;
+  z-index: var(--layer-popover, 30);
+  display: flex;
+  gap: 4px;
+  padding: 4px 6px;
+  border-radius: 7px;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  box-shadow: var(--shadow-s, 0 2px 8px rgba(0, 0, 0, 0.25));
+}
+
+.mrg-toolbar-swatch {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--background-modifier-border);
+  cursor: pointer;
+  box-shadow: none;
+  transition: transform 80ms ease;
+}
+
+.mrg-toolbar-swatch:hover {
+  transform: scale(1.15);
+}
+
+/* --- Settings palette swatch -------------------------------------------- */
+
+.mrg-settings-swatch {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1px solid var(--background-modifier-border);
+  margin-left: 8px;
+  vertical-align: middle;
+}

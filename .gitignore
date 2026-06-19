@@ -1,0 +1,15 @@
+node_modules/
+dist/
+
+# Built plugin artifacts (emitted to repo root for Obsidian; not source)
+main.js
+main.js.map
+
+# Editors / OS
+.DS_Store
+*.log
+.idea/
+.vscode/
+
+# Test / coverage
+coverage/

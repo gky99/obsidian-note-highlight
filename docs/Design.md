@@ -1,0 +1,367 @@
+# Marginalia — Design Document
+
+> **Working title.** "Marginalia" is a placeholder; rename freely.
+
+| | |
+|---|---|
+| **Status** | Draft — design agreed, not yet implemented |
+| **Schema version** | `webclip-annotations/1` |
+| **Last updated** | 2026-06-19 |
+| **Author** | _(you)_ |
+
+---
+
+## 1. Summary
+
+An Obsidian plugin that brings PDF-style annotation to **web clips and other Markdown notes**: highlight arbitrary spans of a source note, attach comments, and review them in a side panel that lines up with the text. Annotations are stored **non-destructively in a per-source sidecar file** written in plain, portable Markdown, and the link from an annotation back to its exact place in the source is **re-resolved live on every use** so it never goes stale across edits or re-clips.
+
+The defining constraint, and the thing every decision below serves: **the stored file must be a useful, human-readable reading-note in any Markdown tool, while remaining a complete, machine-parseable anchor record that survives the source being edited underneath it.**
+
+---
+
+## 2. Goals and non-goals
+
+### Goals
+
+- Highlight **sub-block** spans (a phrase, a sentence) in a source note, not just whole blocks.
+- Attach free-form Markdown comments to each highlight.
+- Review all annotations for a note in a **side panel ("aside")**, ideally aligned vertically with their highlights.
+- **Two-way navigation:** jump from an annotation to its exact source location, and from a highlight to its annotation card.
+- **Non-destructive:** never modify the source clip.
+- **Portable:** the annotation file is readable and meaningful outside Obsidian; the machine data survives sanitizers and foreign editors.
+- **Re-anchor robustly:** survive edits to the source, including wholesale re-clips, or fail loudly (orphan) rather than silently mis-point.
+
+### Non-goals (for v1)
+
+- Annotating PDFs or EPUBs (Obsidian and other tools already do this).
+- Real-time multi-user / collaborative annotation.
+- Annotating arbitrary remote web pages in a browser (this is about *clipped* Markdown already in the vault).
+- A bespoke clipper. We consume whatever Markdown the user's existing clipper produces.
+
+---
+
+## 3. Motivation
+
+Obsidian's native cross-references are limited in exactly the ways this workflow needs them not to be:
+
+- **Block references are block-granular.** `[[note#^id]]` lands on a whole paragraph; you cannot natively target a phrase inside it, and Obsidian explicitly does not support links into parts of quotes, callouts, or tables.
+- **Backlinks are inferred, not stored.** The source→note connection lives only in Obsidian's index, not in the file, so it is neither portable nor guaranteed.
+- **Native links resolve by ID, not by content.** A `^id` that survives a re-clip can silently point at different text; there is no notion of "I can no longer find this passage."
+
+The plugin replaces ID-based targeting with **content-based targeting** (text-quote selectors with context), which simultaneously buys sub-block precision, portability, and honest orphan detection.
+
+---
+
+## 4. Key design decisions
+
+These are the load-bearing choices. Each was chosen against a specific failure mode; record the *why* so they aren't accidentally reverted.
+
+### 4.1 Storage: sidecar, one file per source
+
+Annotations live in a companion file (e.g. `Clips/The Article.annotations.md`), **not inline in the source**. The source clip is never touched.
+
+- **Why:** non-destructive; the source stays byte-identical and re-clippable. The sidecar doubles as the "reading note" the user wanted.
+- **Cost accepted:** highlights are invisible in *other* Markdown apps (there's no markup in the source), and the link is "soft" — resolved by search rather than stored. Both are acceptable given the goals.
+- **Alternative recorded:** *one note per annotation* in a folder. Better if the future need is cross-document thematic coding (each annotation becomes a queryable entity for Bases/Dataview), at the cost of file explosion and a worse per-document overview. Same anchor schema either way — only the container changes. **Chosen: single-file-per-source.** Revisit if cross-doc querying becomes primary.
+
+### 4.2 Separate the anchor from the annotation
+
+An annotation is a record of *(target, comment, presentation)*. The **target is a set of selectors**, never a single stored coordinate. This separation is what makes everything else possible.
+
+### 4.3 The visible blockquote IS the primary selector
+
+The human-readable quote and the machine's exact-match selector are **the same bytes**. The re-anchoring engine reads the blockquote text directly.
+
+- **Why:** one copy → no drift between "what the user sees" and "what the machine matches"; the single most important anchor datum is also the most readable thing in the file.
+
+### 4.4 Machine layer = a fenced code block (`` ```anno ```), not HTML
+
+The non-human anchor data sits in a fenced code block immediately after the blockquote.
+
+- **Rejected — HTML comment:** comments legally cannot contain `--`, and `-->` terminates them; clipped context text routinely contains both, silently truncating data. No standard escaping.
+- **Rejected — hidden HTML element:** stripped by sanitizers (GitHub, static-site pipelines remove `data-*`, `hidden`, custom elements → data loss) and *leaks as visible escaped text* in renderers that default to `html: false`.
+- **Chosen — fenced code block:**
+  - Content is **verbatim** — no escaping; `-->`, `--`, em-dashes, quotes all pass through. The only reserved string is the closing fence, neutralized with a longer fence or tildes.
+  - **Sanitizer- and renderer-proof:** every Markdown tool renders a code block as a code block; never stripped, never reflowed, never leaked as broken markup.
+  - **Worst-case failure mode is "inert grey box"** — visibly contained, never corrupted. (Note the hidden element's worst case is *worse*: corrupted or visibly broken.)
+  - **Hidden inside Obsidian** via `registerMarkdownCodeBlockProcessor("anno", …)` (reading mode) + a `Decoration.replace` in the editor extension (Live Preview), revealing raw text on cursor-enter.
+
+### 4.5 Never store raw character offsets
+
+Offsets are the most brittle selector, are wrong after almost any edit, and only help in the no-change case — where a quote search scoped to a block is already instant. Storing them mostly creates a bug surface where stale positions get trusted.
+
+- **The durable target is the quad:** *quote + prefix + suffix + structural pin.* Offsets are a false sense of precision and are omitted.
+
+### 4.6 Orphan, never silently drop or mis-point
+
+If the resolver cannot find a passage, the annotation is marked `status: orphaned`, kept, and surfaced for review. The plugin **refuses to jump** rather than scroll to a plausible-looking wrong location. Honesty about "I lost this" is a feature, not a default.
+
+### 4.7 Two distinct IDs
+
+- `^anno-<ulid>` — durable identity of *the annotation* (content-independent ULID/nanoid). Lets other notes link to it and lets re-anchoring rewrite every other field without breaking inbound links.
+- `pin: "^h1"` — the *target block* in the source.
+- The annotation `id` is **also stored inside the `anno` block**, so each record is self-identifying and survives reordering rather than depending on document position.
+
+### 4.8 Normalize whitespace everywhere
+
+Web clips get reflowed and re-wrapped constantly — the #1 cause of "it broke on re-clip." Store quote/context whitespace-collapsed, and match against a whitespace-collapsed *projection* of the source with an index map back to real offsets.
+
+---
+
+## 5. File format
+
+### 5.1 Anatomy
+
+A sidecar is: **YAML frontmatter** (file-level metadata) + a sequence of **annotation units**. Each unit is exactly three adjacent pieces, in order:
+
+1. a **blockquote** carrying the quote and the `^anno-id`;
+2. an **`anno` fenced code block** carrying the machine record;
+3. **comment prose** (ordinary Markdown — paragraphs, links, tags, lists).
+
+**Locality rule:** one annotation's data is never split across frontmatter and body. This prevents orphaned half-records when a human hand-edits or deletes a unit.
+
+### 5.2 Worked example
+
+> The example below is wrapped in a 4-backtick fence so the inner 3-backtick `anno` block displays. In a real file the outer fence does not exist.
+
+````markdown
+---
+schema: webclip-annotations/1
+annotates: "Clips/The Article.md"
+source_url: "https://example.com/the-article"
+clipped: 2026-06-19
+source_hash: "sha1:ab12cd34ef…"
+---
+
+> the sentence I care about   ^anno-01J8X2
+
+```anno
+id: 01J8X2
+pin: "^h1"
+heading: "Intro › Background"
+before: "…the words just before "
+after: " the words right after…"
+qhash: "3f9a"
+status: anchored
+color: yellow
+created: 2026-06-19T10:32:00Z
+```
+
+My note about why this matters — ordinary prose, [[wikilinks]], #tags,
+multiple paragraphs, whatever.
+
+---
+
+> ## A quoted heading
+> followed by text with **strong** emphasis   ^anno-01J8X9
+
+```anno
+id: 01J8X9
+pin: "^h4"
+heading: "Methods"
+before: "…preceding sentence. "
+after: " The following sentence…"
+qhash: "b1c2"
+status: orphaned
+color: green
+created: 2026-06-19T11:05:00Z
+```
+
+This reference spans a heading and the paragraph under it — see §6.4.
+````
+
+### 5.3 Frontmatter fields
+
+| Field | Meaning |
+|---|---|
+| `schema` | Versioned format tag; gate parsing/migrations on it. |
+| `annotates` | Vault path of the source note. |
+| `source_url` | Origin URL of the clip (provenance). |
+| `clipped` | Date the source was clipped. |
+| `source_hash` | Hash of the source file's content; fast "did anything change?" check. |
+
+### 5.4 `anno` block fields
+
+| Field | Role | Fragility |
+|---|---|---|
+| `id` | Annotation identity (mirrors `^anno-id`). | — |
+| `pin` | Enclosing source block ID. Shrinks the search scope. | Low |
+| `heading` | Heading path of the enclosing section (fallback scope). | Low |
+| `before` / `after` | ~30 chars / ~5 words of context each side. Disambiguates duplicate quotes; tolerates edits elsewhere. | Medium |
+| `qhash` | Hash of the whitespace-normalized quote; matches across reformatting. | — |
+| `status` | `anchored` \| `orphaned`. | — |
+| `color`, `created`, … | Presentation / metadata. | — |
+
+The **exact quote** itself is not duplicated here — it *is* the blockquote (§4.3).
+
+### 5.5 Inner format choice
+
+**YAML inside the fence.** Rationale: consistent with the frontmatter, human-legible, escaping fully defined, trivially parseable everywhere. JSON-on-one-line is a viable alternative (more compact, stricter) but loses legibility; not chosen.
+
+---
+
+## 6. Anchoring and re-resolution
+
+### 6.1 Selector cascade (decreasing fragility)
+
+This is the W3C Web Annotation / Hypothes.is model. Redundancy is the point.
+
+1. **Exact quote** (the blockquote) — primary.
+2. **Prefix + suffix context** — disambiguation + edit tolerance.
+3. **Structural pin** — `pin` block ID, then `heading` path. Survives reflow within a section; crucially *shrinks the search space*.
+4. **Document fingerprint** (`source_hash`) — has the source changed at all?
+5. **Normalized-quote hash** (`qhash`) — match across reformatting.
+
+### 6.2 Resolution order (at load / before any jump)
+
+```
+resolve(anno, sourceText):
+  1. if hash(sourceText) == frontmatter.source_hash:
+        # source untouched — locate quote within the pinned block. trivial. DONE.
+  2. else scope := pinnedBlockRegion(anno.pin)
+                   ?? headingSection(anno.heading)
+                   ?? wholeDocument
+  3. hits := findExact(anno.quote, scope)        # on normalized projection
+        if hits == 1: return mapBack(hit)
+        if hits  > 1: return disambiguateBy(before, after)
+  4. fuzzy := fuzzyMatch(anno.quote, scope, threshold)   # diff-match-patch
+        if fuzzy: return mapBack(fuzzy)
+  5. anno.status := "orphaned"; surfaceForReview(); return NONE   # never guess
+```
+
+Resolution runs on a **whitespace-normalized projection** of the source, with an index map back to true offsets (§4.8). The same function feeds both highlight rendering and navigation — there is exactly one resolver.
+
+### 6.3 Live re-resolution, not stored positions
+
+Navigation and rendering both call `resolve()` against the *current* source bytes every time. Nothing trusts a saved coordinate. This is precisely why an edited or re-clipped source cannot send a jump to the wrong place — at worst it orphans.
+
+### 6.4 Multi-block / heading-spanning references
+
+A heading and the paragraph beneath it are **two separate blocks**, so a single `pin` block ID cannot cover a quote that includes a heading.
+
+- The quote selector legitimately contains Markdown markers (`##`, `**`); match the **raw source form** and keep markers in the normalized projection — do not stem them away.
+- For heading-inclusive references, pin to the heading and **widen the search window** to run from the pinned heading *through the following block(s)*, rather than assuming the whole quote lives in one block.
+- Single-paragraph highlights remain clean single-block anchors. Branch on this in the resolver. **This is the one place the design quietly corrupts if implemented wrong — give it dedicated test cases.**
+
+---
+
+## 7. Rendering
+
+> Confirmed straightforward in this project; specified here for completeness.
+
+### 7.1 Editor (source / Live Preview — CodeMirror 6)
+
+- A **ViewPlugin** (or StateField) holds resolved annotation ranges and emits `Decoration.mark` for highlights.
+- Updates flow through a `StateEffect`; the decoration `RangeSet` is `.map()`-ed through document changes so highlights stay attached as the user types above them.
+- The `anno` blocks are hidden with a `Decoration.replace` (collapse to nothing or a tiny widget), revealing raw text when the cursor enters the block — like native `**bold**` markup reveal.
+
+### 7.2 Reading mode
+
+- `registerMarkdownPostProcessor` renders highlights.
+- `registerMarkdownCodeBlockProcessor("anno", …)` receives each block's raw text, ingests it into the store, and renders **nothing** (optionally a small clickable marker), making the block vanish.
+
+### 7.3 The "aside" panel
+
+- A custom `ItemView` registered via `registerView`, placed in the right sidebar; tracks the active file via `workspace.on('file-open')`.
+- Renders one card per annotation: quote, editable comment, color, jump button.
+- **Marginalia alignment (stretch):** use `EditorView.coordsAtPos(pos)` to read each highlight's screen Y and absolutely-position cards to line up with their highlights. Recompute on scroll + `ViewUpdate`; compute only for viewport-near annotations and debounce. No existing plugin does this well — it's the differentiator, and the fiddliest part (card collision/stacking, overlapping highlights).
+
+---
+
+## 8. Navigation
+
+The jump is **plugin-owned**, because the target is a content selector Obsidian cannot interpret. It is a two-stage move: **find** (re-resolve, §6.3) then **go**.
+
+### 8.1 Forward — annotation card → source
+
+```
+jumpTo(anno):
+  range := resolve(anno, read(sourceFile))     # live; never a stored offset
+  if !range: flagOrphan(anno); return          # refuse to guess (§4.6)
+  open sourceFile
+  setSelection(range); scrollIntoView(range, center)
+  dispatch transient flash decoration
+```
+
+Block-pin fallback uses native `workspace.openLinkText("Source#^h1", path)`.
+
+### 8.2 Reverse — highlight → annotation card
+
+In the editor extension's `update()`, when the cursor/selection lands inside a painted highlight range, scroll the matching card into view and pulse it.
+
+### 8.3 One resolver, three handlers
+
+Forward jump, reverse pulse, and orphan-aware refusal are three small handlers over the single `resolve()` function. Both directions read the same in-memory store keyed by `^anno-id`.
+
+---
+
+## 9. Implementation surface (Obsidian / CM6)
+
+- `registerEditorExtension([viewPlugin, stateField])` — loads the CM6 extension across all current/future editors; handles unload. **Mark all `@codemirror/*` packages `external` in the bundler** — Obsidian provides them; bundling your own copy breaks things.
+- `@codemirror/view`: `ViewPlugin`, `Decoration.mark/.widget/.replace`, `DecorationSet`, `EditorView.coordsAtPos`, `EditorView.scrollIntoView`, `WidgetType`.
+- `@codemirror/state`: `StateField`, `StateEffect`, `RangeSet` (`.map(tr.changes)`).
+- `registerMarkdownPostProcessor` — reading-mode render path.
+- `registerMarkdownCodeBlockProcessor("anno", …)` — ingest + hide the machine block.
+- `registerView` + `ItemView`, `workspace.getRightLeaf`, `getLeavesOfType` — the aside.
+- `app.metadataCache.getFileCache(file)` — `blocks`, `sections`, `headings`, `listItems` with positions; map `pin`/`heading` → offsets without re-parsing. Subscribe to `metadataCache.on('changed', …)`.
+- `app.vault.cachedRead(file)` — read source for resolution.
+- `app.vault.process(file, fn)` — atomic read-modify-write when updating a sidecar (e.g. flipping `status`, refreshing `before`/`after`).
+- `app.fileManager.generateMarkdownLink` — link generation respecting user settings.
+
+---
+
+## 10. Edge cases and failure modes
+
+| # | Risk | Mitigation |
+|---|---|---|
+| 1 | **Anchor drift on live edits** | `RangeSet.map()` through CM transactions within a session. |
+| 2 | **Edits made while plugin wasn't watching / by other apps** | Quote + context selector re-resolution at load (§6.2). |
+| 3 | **Re-clip rewrites the whole source** | Only quote-selector re-anchoring survives; `source_hash` detects it; orphan + surface rather than mis-point. |
+| 4 | **Three render modes** | Source/Live Preview via CM6; reading via post-processor — one store, two renderers. |
+| 5 | **Heading-spanning quote crosses block boundary** | Widen search window past the pinned block (§6.4); dedicated tests. |
+| 6 | **`coordsAtPos` cost on long notes** | Viewport-near only; debounce on scroll. |
+| 7 | **Overlapping / nested highlights** | Mark decorations may overlap; define color/stacking + card collision rules. |
+| 8 | **Quoted heading polluting the sidecar's own outline** | Verified acceptable in this project for the literal form; if it bites, store heading downgraded and re-style on render. |
+| 9 | **Duplicate quote text in source** | `before`/`after` disambiguation; fall to fuzzy + orphan. |
+| 10 | **Closing-fence collision in `anno`/quote content** | Use a longer outer fence / tildes when serializing. |
+
+---
+
+## 11. Portability analysis
+
+What a **non-Obsidian** consumer sees, by component:
+
+- **Frontmatter** — standard YAML; treated as opaque/structured by virtually every tool.
+- **Blockquote** — renders as a normal quote (with preserved headings/bold/etc.); *this is the human reading-note*.
+- **`anno` block** — renders as an inert, contained code block; never stripped, never corrupted. Machine-parseable by a trivial script in any language via the documented schema.
+- **Comment prose** — ordinary Markdown.
+
+Net: the file is a faithful reading-note when rendered anywhere, and a complete anchor record when parsed anywhere. The only thing that does not travel is *clickable* navigation — which was never portable in Obsidian's native form either, and here is recoverable because the target is content, not an opaque ID.
+
+---
+
+## 12. Open questions and future work
+
+- **Note-per-annotation mode** for cross-document thematic coding; Bases/Dataview aggregation over annotations as first-class entities.
+- **Color/tag taxonomy** and filtering in the aside.
+- **Orphan recovery UX** — a review queue with "re-attach here" affordance, à la Hypothes.is orphan handling.
+- **Multiple sources per sidecar?** (Currently 1:1. Probably keep 1:1.)
+- **Export** — to W3C Web Annotation JSON, or to inline-committed `==highlight==` + footnote form for a fully self-contained source.
+- **Settings** — context length, fuzzy threshold, fence style, sidecar naming/location convention.
+- **Performance budget** at N annotations / large vault.
+
+---
+
+## 13. Suggested implementation phases
+
+1. **Core model + sidecar I/O** — parse/serialize frontmatter + annotation units; round-trip safety; schema gate.
+2. **Resolver** — selector cascade, normalization + index map, multi-block window, orphan path. *Build this against fixtures first; it's the spine.*
+3. **Editor rendering** — `Decoration.mark` highlights + `anno`-block hiding; `RangeSet` mapping.
+4. **Reading-mode rendering** — post-processor + code-block processor.
+5. **Aside panel** — `ItemView` card list; comment editing write-back.
+6. **Navigation** — forward jump, reverse pulse, orphan refusal.
+7. **Marginalia alignment** (stretch) — `coordsAtPos` positioning.
+8. **Hardening** — re-clip/orphan flows, performance, overlaps.
+
+---
+

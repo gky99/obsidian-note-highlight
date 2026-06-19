@@ -1,0 +1,311 @@
+/**
+ * Marginalia — plugin entry point and wiring.
+ *
+ * This module owns no annotation logic; it composes the already-built layers:
+ *  - the {@link AnnotationStore} (sidecar I/O + live re-resolution),
+ *  - the CM6 editor extension (highlight painting, anno-block hiding, reverse nav),
+ *  - the reading-mode processors (anno hiding + best-effort highlights),
+ *  - the aside panel (card list + comment/color write-back),
+ *  - and navigation (forward jump).
+ *
+ * Its job is the plumbing between Obsidian's workspace events and those layers:
+ * load+re-resolve on file-open / source-or-sidecar change, repaint the relevant
+ * editors, and keep the aside pointed at the active source (Design.md §9).
+ */
+import {
+  Plugin,
+  MarkdownView,
+  Notice,
+  TFile,
+  type Editor,
+  type WorkspaceLeaf,
+} from 'obsidian';
+import type { EditorView } from '@codemirror/view';
+
+import { DEFAULT_SETTINGS, type MarginaliaSettings } from '@/settings';
+import { AnnotationStore } from '@/store/store';
+import { jumpToAnnotation } from '@/navigation';
+import { isSidecarPath, sourcePathForSidecar } from '@/obsidian/sidecar-path';
+import {
+  marginaliaEditorExtension,
+  setHighlights,
+  flashRange,
+  type HighlightSpec,
+} from '@/editor';
+import { renderAnnoBlock, makeReadingHighlighter, ANNO_LANGUAGE } from '@/reading';
+import { findSourceRange } from '@/text/locate';
+import {
+  ASIDE_VIEW_TYPE,
+  MarginaliaAsideView,
+  MarginaliaSettingTab,
+  SelectionToolbar,
+  type SettingsHost,
+  type HighlightRequest,
+} from '@/ui';
+
+const MARKDOWN_VIEW_TYPE = 'markdown';
+
+export default class MarginaliaPlugin extends Plugin implements SettingsHost {
+  settings: MarginaliaSettings = { ...DEFAULT_SETTINGS };
+  store!: AnnotationStore;
+  /** Last painted highlight signature per source, to re-render reading mode only when it changes. */
+  private readingSig = new Map<string, string>();
+
+  async onload(): Promise<void> {
+    await this.loadSettings();
+    this.store = new AnnotationStore(this.app, this.settings);
+
+    // --- CM6 editor extension: highlights + anno hiding + reverse nav -----
+    this.registerEditorExtension(
+      marginaliaEditorExtension({
+        revealAnnoBlocks: this.settings.revealAnnoOnCursor,
+        onHighlightClick: (id) => this.getAside()?.revealCard(id),
+        onActiveHighlightsChange: (ids) => {
+          if (ids.length > 0) this.getAside()?.pulseCard(ids[0]);
+        },
+      }),
+    );
+
+    // --- Floating selection toolbar (works in Live Preview AND reading mode) --
+    const toolbar = new SelectionToolbar({
+      app: this.app,
+      getColors: () => this.settings.palette,
+      onHighlight: (req, color) => void this.highlightRequest(req, color),
+    });
+    toolbar.start();
+    this.register(() => toolbar.destroy());
+
+    // --- Reading mode -----------------------------------------------------
+    this.registerMarkdownCodeBlockProcessor(ANNO_LANGUAGE, (src, el, ctx) =>
+      renderAnnoBlock(src, el, ctx),
+    );
+    this.registerMarkdownPostProcessor(makeReadingHighlighter(this.store));
+
+    // --- Aside panel ------------------------------------------------------
+    this.registerView(
+      ASIDE_VIEW_TYPE,
+      (leaf) =>
+        new MarginaliaAsideView(leaf, {
+          app: this.app,
+          store: this.store,
+          settings: this.settings,
+          jumpTo: (sourcePath, id) =>
+            jumpToAnnotation(this.app, this.store, sourcePath, id, flashRange),
+        }),
+    );
+
+    this.addSettingTab(new MarginaliaSettingTab(this.app, this));
+
+    // --- Commands & ribbon ------------------------------------------------
+    this.addCommand({
+      id: 'highlight-selection',
+      name: 'Highlight selection',
+      editorCallback: (editor, ctx) => {
+        if (ctx instanceof MarkdownView) void this.highlightSelection(editor, ctx);
+      },
+    });
+    this.addCommand({
+      id: 'open-annotations-panel',
+      name: 'Open annotations panel',
+      callback: () => void this.activateAside(true),
+    });
+    this.addRibbonIcon('highlighter', 'Marginalia: annotations', () =>
+      void this.activateAside(true),
+    );
+
+    // --- Reactivity -------------------------------------------------------
+    // Our own store emitter: repaint editors when a file's annotations change.
+    this.register(this.store.onChange((sourcePath) => this.repaint(sourcePath)));
+
+    this.registerEvent(this.app.workspace.on('file-open', () => void this.syncActiveFile()));
+    this.registerEvent(
+      this.app.workspace.on('active-leaf-change', () => void this.syncActiveFile()),
+    );
+    this.registerEvent(this.app.metadataCache.on('changed', (file) => this.maybeReload(file)));
+    this.registerEvent(
+      this.app.vault.on('modify', (file) => {
+        if (file instanceof TFile) this.maybeReload(file);
+      }),
+    );
+    this.registerEvent(
+      this.app.vault.on('delete', (file) => {
+        if (file instanceof TFile) this.store.forget(file.path);
+      }),
+    );
+
+    // Initial sync once the workspace is ready (the active file is reliable then).
+    this.app.workspace.onLayoutReady(() => {
+      void this.syncActiveFile();
+      if (this.settings.autoOpenAside) void this.activateAside(false);
+    });
+  }
+
+  // --- settings -----------------------------------------------------------
+
+  async loadSettings(): Promise<void> {
+    Object.assign(this.settings, DEFAULT_SETTINGS, await this.loadData());
+    // Own a private copy of the palette so edits never alias DEFAULT_SETTINGS,
+    // and never let a hand-edited empty list leave us with no colors to offer.
+    this.settings.palette =
+      Array.isArray(this.settings.palette) && this.settings.palette.length > 0
+        ? [...this.settings.palette]
+        : [...DEFAULT_SETTINGS.palette];
+  }
+
+  async saveSettings(): Promise<void> {
+    await this.saveData(this.settings);
+    // The store, aside, and navigation share this.settings by reference, so
+    // changes take effect on the next load. (The editor extension captured
+    // revealAnnoBlocks at registration; that one needs a reload to change.)
+    void this.syncActiveFile();
+  }
+
+  // --- active-file plumbing ----------------------------------------------
+
+  /** The source note an open file is "about" (a sidecar maps back to its source). */
+  private resolveSourcePath(path: string): string {
+    if (isSidecarPath(path, this.settings.sidecarSuffix)) {
+      return (
+        sourcePathForSidecar(path, this.settings.sidecarSuffix, this.settings.sidecarFolder) ?? path
+      );
+    }
+    return path;
+  }
+
+  private getAside(): MarginaliaAsideView | null {
+    const leaf = this.app.workspace.getLeavesOfType(ASIDE_VIEW_TYPE)[0];
+    return leaf && leaf.view instanceof MarginaliaAsideView ? leaf.view : null;
+  }
+
+  /** Load + re-resolve the active file's source and point the aside at it. */
+  private async syncActiveFile(): Promise<void> {
+    const active = this.app.workspace.getActiveFile();
+    if (!active || active.extension !== 'md') {
+      this.getAside()?.setSourceFile(null);
+      return;
+    }
+    const sourcePath = this.resolveSourcePath(active.path);
+    const sourceFile = this.app.vault.getAbstractFileByPath(sourcePath);
+    if (sourceFile instanceof TFile) {
+      this.getAside()?.setSourceFile(sourcePath);
+      await this.store.load(sourceFile); // emits → repaint() + aside refresh
+    } else {
+      this.getAside()?.setSourceFile(null);
+    }
+  }
+
+  /** Reload when the active source — or its sidecar — changes underneath us. */
+  private maybeReload(file: TFile): void {
+    const activePath = this.app.workspace.getActiveFile()?.path;
+    if (!activePath) return;
+    const sourcePath = this.resolveSourcePath(activePath);
+    const sidecarPath = this.store.sidecarPathFor(sourcePath);
+    if (file.path !== sourcePath && file.path !== sidecarPath) return;
+    const sourceFile = this.app.vault.getAbstractFileByPath(sourcePath);
+    if (sourceFile instanceof TFile) void this.store.load(sourceFile);
+  }
+
+  /**
+   * Repaint every open view of `sourcePath`. CM editors (source / Live Preview)
+   * get the highlight specs pushed directly; reading-mode views paint via the
+   * post-processor, so they need a re-render — but only when the highlight set
+   * actually changed (a comment edit must not flash the preview).
+   */
+  private repaint(sourcePath: string): void {
+    const specs: HighlightSpec[] = [];
+    for (const r of this.store.getResolved(sourcePath)) {
+      if (r.result.status === 'anchored') {
+        specs.push({
+          id: r.annotation.id,
+          from: r.result.range.from,
+          to: r.result.range.to,
+          color: r.annotation.record.color,
+        });
+      }
+    }
+
+    const signature = specs.map((s) => `${s.id}:${s.from}:${s.to}:${s.color ?? ''}`).join('|');
+    const readingStale = this.readingSig.get(sourcePath) !== signature;
+    this.readingSig.set(sourcePath, signature);
+
+    for (const leaf of this.app.workspace.getLeavesOfType(MARKDOWN_VIEW_TYPE)) {
+      const view = leaf.view;
+      if (!(view instanceof MarkdownView) || view.file?.path !== sourcePath) continue;
+      if (view.getMode() === 'preview') {
+        if (readingStale) view.previewMode.rerender(true);
+      } else {
+        const cm = editorView(view.editor);
+        if (cm) setHighlights(cm, specs);
+      }
+    }
+  }
+
+  // --- actions ------------------------------------------------------------
+
+  private async highlightSelection(editor: Editor, view: MarkdownView): Promise<void> {
+    const file = view.file;
+    if (!file) return;
+    const from = editor.posToOffset(editor.getCursor('from'));
+    const to = editor.posToOffset(editor.getCursor('to'));
+    if (from === to) {
+      new Notice('Marginalia: select some text first.');
+      return;
+    }
+    await this.highlightRange(file, from, to);
+  }
+
+  /**
+   * Handle a toolbar highlight request. In source / Live Preview the range is
+   * exact; in reading mode only the selected text is known, so re-locate it in
+   * the source (best-effort) before highlighting.
+   */
+  private async highlightRequest(req: HighlightRequest, color: string): Promise<void> {
+    if (req.range) {
+      await this.highlightRange(req.file, req.range.from, req.range.to, color);
+      return;
+    }
+    const sourceText = await this.app.vault.cachedRead(req.file);
+    const range = findSourceRange(sourceText, req.text);
+    if (!range) {
+      new Notice('Marginalia: couldn’t locate that selection in the note source. Try Live Preview.');
+      return;
+    }
+    await this.highlightRange(req.file, range.from, range.to, color);
+  }
+
+  /**
+   * Create a highlight over source range `[from, to)` (used by the command and
+   * the floating selection toolbar), then surface its card in the aside.
+   */
+  private async highlightRange(
+    file: TFile,
+    from: number,
+    to: number,
+    color?: string,
+  ): Promise<void> {
+    if (from === to) return;
+    const anno = await this.store.createHighlight(file, from, to, color);
+    if (!anno) return;
+    await this.activateAside(false);
+    const aside = this.getAside();
+    aside?.setSourceFile(file.path);
+    aside?.revealCard(anno.id);
+  }
+
+  private async activateAside(reveal: boolean): Promise<void> {
+    let leaf: WorkspaceLeaf | null = this.app.workspace.getLeavesOfType(ASIDE_VIEW_TYPE)[0] ?? null;
+    if (!leaf) {
+      leaf = this.app.workspace.getRightLeaf(false);
+      if (!leaf) return;
+      await leaf.setViewState({ type: ASIDE_VIEW_TYPE, active: true });
+    }
+    if (reveal) this.app.workspace.revealLeaf(leaf);
+    const active = this.app.workspace.getActiveFile();
+    if (active) this.getAside()?.setSourceFile(this.resolveSourcePath(active.path));
+  }
+}
+
+/** Obsidian exposes the underlying CM6 view as the undocumented `editor.cm`. */
+function editorView(editor: Editor): EditorView | undefined {
+  return (editor as unknown as { cm?: EditorView }).cm;
+}
