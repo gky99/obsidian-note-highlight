@@ -66,6 +66,9 @@ export interface AnnoRecord {
   color?: string;
   /** Creation timestamp (ISO 8601). */
   created?: string;
+  // Note: the on-disk `comment: true` flag is a *derived* presence hint emitted
+  // by the serializer and stripped by the parser; it is intentionally NOT a field
+  // here — the parsed {@link Annotation.comment} prose is the source of truth.
   /** Unknown/forward-compatible fields are preserved on round-trip. */
   [key: string]: unknown;
 }

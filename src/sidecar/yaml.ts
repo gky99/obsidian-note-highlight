@@ -22,6 +22,7 @@ const ANNO_KEY_ORDER: readonly string[] = [
   'status',
   'color',
   'created',
+  'comment',
 ];
 
 /** Canonical key order for frontmatter; unknown keys trail, in insertion order. */

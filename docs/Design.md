@@ -98,9 +98,9 @@ If the resolver cannot find a passage, the annotation is marked `status: orphane
 
 ### 4.7 Two distinct IDs
 
-- `^anno-<ulid>` — durable identity of *the annotation* (content-independent ULID/nanoid). Lets other notes link to it and lets re-anchoring rewrite every other field without breaking inbound links.
+- `^anno-<id>` — durable identity of *the annotation* (a short, content-independent base36 id; per-file unique). Lets other notes link to it and lets re-anchoring rewrite every other field without breaking inbound links.
 - `pin: "^h1"` — the *target block* in the source.
-- The annotation `id` is **also stored inside the `anno` block**, so each record is self-identifying and survives reordering rather than depending on document position.
+- The annotation `id` is **also stored inside the `anno` block** (`id:`), and it is now **the binding key**: the quote's `^anno-<id>` ref and the record's `id:` bind quote↔record *by id, not by position*. This is what lets the machine `anno` blocks be collected at the end of the file (§5.1) while each still resolves to its quote — the ref is load-bearing, no longer cosmetic.
 
 ### 4.8 Normalize whitespace everywhere
 
@@ -112,13 +112,16 @@ Web clips get reflowed and re-wrapped constantly — the #1 cause of "it broke o
 
 ### 5.1 Anatomy
 
-A sidecar is: **YAML frontmatter** (file-level metadata) + a sequence of **annotation units**. Each unit is exactly three adjacent pieces, in order:
+A sidecar is: **YAML frontmatter** (file-level metadata), then a sequence of **quote units**, then all the machine **`anno` blocks collected at the end of the file**. A quote unit is:
 
-1. a **blockquote** carrying the quote and the `^anno-id`;
-2. an **`anno` fenced code block** carrying the machine record;
-3. **comment prose** (ordinary Markdown — paragraphs, links, tags, lists).
+1. a **blockquote** carrying the quote and the `^anno-<id>` ref;
+2. **comment prose** (ordinary Markdown — paragraphs, links, tags, lists, inline formatting), closed by an invisible `[/]:#` terminator.
 
-**Locality rule:** one annotation's data is never split across frontmatter and body. This prevents orphaned half-records when a human hand-edits or deletes a unit.
+The matching **`anno` block** (the machine record) lives in the trailing section and binds back to its quote **by id** (`^anno-<id>` ↔ `id:`), not by position (§4.7) — so it never has to interrupt the human-readable quote + comment. The reader sees quotes and notes together; the machine data sits out of the way at the bottom.
+
+**Comment delimiting.** The comment is closed by a `[/]:#` sentinel — a link reference definition that every Markdown renderer emits as *nothing*, so it is invisible when read yet an explicit, machine-unambiguous end marker. The `anno` block also carries `comment: true` exactly when prose follows (a derived presence hint). As a safeguard against a missing/garbled sentinel, a **fenced code block or a blockquote line** (the next unit) also ends the comment — so a comment can never run away. Cost accepted by design: a comment supports lists and inline syntax but **not** blockquotes or code blocks (those terminate it); a `---` thematic rule, by contrast, is ordinary comment content. No `---` separator is written between units.
+
+**Locality relaxed.** The original design kept all three pieces adjacent ("locality rule") so a hand-edit couldn't orphan half a record; collecting `anno` blocks at the end deliberately trades that for readability. The id-binding plus the §10 #11 resilience (fault isolation; a quote with no record is reported, a record with no quote is silently dropped) is what makes the relaxation safe.
 
 ### 5.2 Worked example
 
@@ -133,10 +136,22 @@ clipped: 2026-06-19
 source_hash: "sha1:ab12cd34ef…"
 ---
 
-> the sentence I care about   ^anno-01J8X2
+> the sentence I care about   ^anno-A1B2C3
+
+My note about why this matters — ordinary prose, [[wikilinks]], #tags,
+multiple paragraphs, whatever.
+
+[/]:#
+
+> ## A quoted heading
+> followed by text with **strong** emphasis   ^anno-D4E5F6
+
+This reference spans a heading and the paragraph under it — see §6.4.
+
+[/]:#
 
 ```anno
-id: 01J8X2
+id: A1B2C3
 pin: "^h1"
 heading: "Intro › Background"
 before: "…the words just before "
@@ -145,18 +160,11 @@ qhash: "3f9a"
 status: anchored
 color: yellow
 created: 2026-06-19T10:32:00Z
+comment: true
 ```
 
-My note about why this matters — ordinary prose, [[wikilinks]], #tags,
-multiple paragraphs, whatever.
-
----
-
-> ## A quoted heading
-> followed by text with **strong** emphasis   ^anno-01J8X9
-
 ```anno
-id: 01J8X9
+id: D4E5F6
 pin: "^h4"
 heading: "Methods"
 before: "…preceding sentence. "
@@ -165,9 +173,8 @@ qhash: "b1c2"
 status: orphaned
 color: green
 created: 2026-06-19T11:05:00Z
+comment: true
 ```
-
-This reference spans a heading and the paragraph under it — see §6.4.
 ````
 
 ### 5.3 Frontmatter fields
@@ -184,15 +191,16 @@ This reference spans a heading and the paragraph under it — see §6.4.
 
 | Field | Role | Fragility |
 |---|---|---|
-| `id` | Annotation identity (mirrors `^anno-id`). | — |
+| `id` | Annotation identity; **binds the block to its quote** by matching the quote's `^anno-<id>` ref (§4.7), so the block can live anywhere (it is collected at the file end). | — |
 | `pin` | Enclosing source block ID. Shrinks the search scope. | Low |
 | `heading` | Heading path of the enclosing section (fallback scope). | Low |
 | `before` / `after` | ~30 chars / ~5 words of context each side. Disambiguates duplicate quotes; tolerates edits elsewhere. | Medium |
 | `qhash` | Hash of the whitespace-normalized quote; matches across reformatting. | — |
 | `status` | `anchored` \| `orphaned`. | — |
+| `comment` | `true` iff comment prose follows the block. Derived presence hint; the prose is the source of truth, so the parser strips it. | — |
 | `color`, `created`, … | Presentation / metadata. | — |
 
-The **exact quote** itself is not duplicated here — it *is* the blockquote (§4.3).
+The **exact quote** itself is not duplicated here — it *is* the blockquote (§4.3). Nor is the comment: it follows the *quote* as prose, closed by the `[/]:#` terminator (§5.1). The block carries only the machine record and binds back to its quote by `id` (§4.7).
 
 ### 5.5 Inner format choice
 
@@ -324,6 +332,7 @@ Forward jump, reverse pulse, and orphan-aware refusal are three small handlers o
 | 8 | **Quoted heading polluting the sidecar's own outline** | Verified acceptable in this project for the literal form; if it bites, store heading downgraded and re-style on render. |
 | 9 | **Duplicate quote text in source** | `before`/`after` disambiguation; fall to fuzzy + orphan. |
 | 10 | **Closing-fence collision in `anno`/quote content** | Use a longer outer fence / tildes when serializing. |
+| 11 | **One corrupt / hand-edited unit** | Read path isolates per-unit (skip + report, keep the rest); write path stays strict (refuses rather than clobbering). Binding is id-aware (`^anno-<id>` recovery) so prose inserted between a quote and its fence doesn't break the link. |
 
 ---
 

@@ -3,13 +3,14 @@ import { describe, it, expect } from 'vitest';
 import type { Sidecar } from '@/model/types';
 import { SCHEMA_VERSION } from '@/model/types';
 
-import { parseSidecar } from './parse';
+import { parseSidecar, type ParseIssue } from './parse';
 import { serializeSidecar } from './serialize';
 import { SidecarParseError, SidecarSchemaError } from './errors';
 
 /**
  * The §5.2 worked example, verbatim (minus the outer 4-backtick display fence
- * that only exists to render the inner block in the doc).
+ * that only exists to render the inner block in the doc). Comments are closed by
+ * the invisible `[/]:#` terminator and the anno blocks note `comment: true`.
  */
 const EXAMPLE_52 = `---
 schema: webclip-annotations/1
@@ -21,6 +22,18 @@ source_hash: "sha1:ab12cd34ef…"
 
 > the sentence I care about   ^anno-01J8X2
 
+My note about why this matters — ordinary prose, [[wikilinks]], #tags,
+multiple paragraphs, whatever.
+
+[/]:#
+
+> ## A quoted heading
+> followed by text with **strong** emphasis   ^anno-01J8X9
+
+This reference spans a heading and the paragraph under it — see §6.4.
+
+[/]:#
+
 \`\`\`anno
 id: 01J8X2
 pin: "^h1"
@@ -31,15 +44,8 @@ qhash: "3f9a"
 status: anchored
 color: yellow
 created: 2026-06-19T10:32:00Z
+comment: true
 \`\`\`
-
-My note about why this matters — ordinary prose, [[wikilinks]], #tags,
-multiple paragraphs, whatever.
-
----
-
-> ## A quoted heading
-> followed by text with **strong** emphasis   ^anno-01J8X9
 
 \`\`\`anno
 id: 01J8X9
@@ -51,9 +57,8 @@ qhash: "b1c2"
 status: orphaned
 color: green
 created: 2026-06-19T11:05:00Z
+comment: true
 \`\`\`
-
-This reference spans a heading and the paragraph under it — see §6.4.
 `;
 
 describe('parseSidecar — §5.2 worked example', () => {
@@ -214,8 +219,8 @@ describe('round-trip safety', () => {
   });
 });
 
-describe('robust unit detection (no reliance on --- separators)', () => {
-  it('does NOT split a unit on a --- or > line inside the comment prose', () => {
+describe('comment delimiting (§5.1 terminator + safeguards)', () => {
+  it('keeps a thematic rule and a list inside a comment, ending at [/]:#', () => {
     const text = `---
 schema: webclip-annotations/1
 annotates: "Clips/Note.md"
@@ -223,34 +228,92 @@ annotates: "Clips/Note.md"
 
 > the quote   ^anno-XYZ
 
-\`\`\`anno
-id: XYZ
-status: anchored
-\`\`\`
-
-Here is a comment that itself contains a horizontal rule:
+A comment with a thematic rule:
 
 ---
 
-and even a blockquote line that must NOT start a new unit:
+and a list:
 
-> this looks like a quote but it is just prose
+- one
+- two
 
-end of comment.
+[/]:#
+
+\`\`\`anno
+id: XYZ
+status: anchored
+comment: true
+\`\`\`
 `;
     const sidecar = parseSidecar(text);
     expect(sidecar.annotations).toHaveLength(1);
     const a = sidecar.annotations[0];
     expect(a.quote).toBe('the quote');
-    // The internal --- and > lines are preserved as comment content. The lone
-    // trailing-unit HR logic only strips an HR that *terminates* the comment.
-    expect(a.comment).toContain('horizontal rule:');
+    // A bare --- is ordinary comment content now (the terminator is [/]:#).
     expect(a.comment).toContain('---');
-    expect(a.comment).toContain('> this looks like a quote but it is just prose');
-    expect(a.comment.endsWith('end of comment.')).toBe(true);
+    expect(a.comment).toContain('- one');
+    expect(a.comment.endsWith('- two')).toBe(true);
+    // The [/]:# sentinel itself is consumed, never part of the comment.
+    expect(a.comment).not.toContain('[/]:#');
   });
 
-  it('captures the contiguous blockquote even across blank lines above the anno block', () => {
+  it('ends a comment at the next unit blockquote even without a [/]:# terminator', () => {
+    const text = `---
+schema: webclip-annotations/1
+annotates: "Clips/Note.md"
+---
+
+> first   ^anno-A
+
+comment for A
+
+> second   ^anno-B
+
+\`\`\`anno
+id: A
+status: anchored
+comment: true
+\`\`\`
+
+\`\`\`anno
+id: B
+status: anchored
+\`\`\`
+`;
+    const annotations = parseSidecar(text).annotations;
+    expect(annotations.map((x) => x.id)).toEqual(['A', 'B']);
+    // The blockquote safeguard stops A's comment; it never eats unit B.
+    expect(annotations[0].comment).toBe('comment for A');
+    expect(annotations[1].comment).toBe('');
+  });
+
+  it('ends a comment at a fenced code block (safeguard)', () => {
+    const text = `---
+schema: webclip-annotations/1
+annotates: "Clips/Note.md"
+---
+
+> q   ^anno-A
+
+comment before code
+
+\`\`\`js
+not part of the comment
+\`\`\`
+
+[/]:#
+
+\`\`\`anno
+id: A
+status: anchored
+comment: true
+\`\`\`
+`;
+    const a = parseSidecar(text).annotations[0];
+    expect(a.comment).toBe('comment before code');
+  });
+
+  it('binds a multi-line quote to its anno block by id', () => {
     const text = `---
 schema: webclip-annotations/1
 annotates: "Clips/Note.md"
@@ -259,17 +322,106 @@ annotates: "Clips/Note.md"
 > line one
 > line two   ^anno-Q1
 
-
 \`\`\`anno
 id: Q1
 status: anchored
 \`\`\`
-
-comment
 `;
     const a = parseSidecar(text).annotations[0];
     expect(a.quote).toBe('line one\nline two');
     expect(a.id).toBe('Q1');
+  });
+});
+
+describe('anno block placement (id binding, not position)', () => {
+  it('binds quotes to anno blocks collected at the end of the file, in any order', () => {
+    const text = `---
+schema: webclip-annotations/1
+annotates: "Clips/Note.md"
+---
+
+> quote A   ^anno-AA
+
+note A
+
+[/]:#
+
+> quote B   ^anno-BB
+
+\`\`\`anno
+id: BB
+status: anchored
+\`\`\`
+
+\`\`\`anno
+id: AA
+status: anchored
+comment: true
+\`\`\`
+`;
+    // AA's anno block is placed AFTER BB's — order is irrelevant; the ref binds.
+    const s = parseSidecar(text);
+    expect(s.annotations.map((a) => a.id)).toEqual(['AA', 'BB']);
+    expect(s.annotations[0].quote).toBe('quote A');
+    expect(s.annotations[0].comment).toBe('note A');
+    expect(s.annotations[1].quote).toBe('quote B');
+    expect(s.annotations[1].comment).toBe('');
+  });
+
+  it('serializes every anno block to the end of the file, after the quotes', () => {
+    const out = serializeSidecar(
+      makeSidecar([
+        { id: 'AA', quote: 'qa', record: { id: 'AA', status: 'anchored' }, comment: 'ca' },
+        { id: 'BB', quote: 'qb', record: { id: 'BB', status: 'anchored' }, comment: '' },
+      ]),
+    );
+    // Both quotes precede the first anno block in the serialized output.
+    const firstAnno = out.indexOf('```anno');
+    expect(out.indexOf('^anno-AA')).toBeLessThan(firstAnno);
+    expect(out.indexOf('^anno-BB')).toBeLessThan(firstAnno);
+  });
+});
+
+describe('comment presence flag + terminator (serialize)', () => {
+  it('emits comment: true and the [/]:# terminator only when a comment exists', () => {
+    const withComment = makeSidecar([
+      { id: 'WC', quote: 'q', record: { id: 'WC', status: 'anchored' }, comment: 'hello note' },
+    ]);
+    const out = serializeSidecar(withComment);
+    expect(out).toContain('comment: true');
+    expect(out).toMatch(/hello note\n\n\[\/\]:#/);
+    expect(parseSidecar(out)).toEqual(withComment);
+
+    const noComment = makeSidecar([
+      { id: 'NC', quote: 'q', record: { id: 'NC', status: 'anchored' }, comment: '' },
+    ]);
+    const out2 = serializeSidecar(noComment);
+    expect(out2).not.toContain('comment: true');
+    expect(out2).not.toContain('[/]:#');
+    expect(parseSidecar(out2)).toEqual(noComment);
+  });
+
+  it('strips the derived comment flag from the parsed record', () => {
+    const text = `---
+schema: webclip-annotations/1
+annotates: "Clips/Note.md"
+---
+
+> q   ^anno-F
+
+a note
+
+[/]:#
+
+\`\`\`anno
+id: F
+status: anchored
+comment: true
+\`\`\`
+`;
+    const a = parseSidecar(text).annotations[0];
+    expect('comment' in a.record).toBe(false);
+    expect(a.comment).toBe('a note');
   });
 });
 
@@ -292,24 +444,25 @@ c
     expect(a.quote).toBe('just the quote text');
   });
 
-  it("prefers the anno block's id when the ref and record disagree", () => {
-    // Ref says MISMATCH, record says CANON — Annotation.id must follow the record.
-    const a = parseSidecar(`---
+  it('drops a quote whose ref matches no anno block, reporting it', () => {
+    // The `^anno-<id>` ref is now the binding key: a quote whose ref points at no
+    // anno block is an incomplete unit (skipped + reported, never mis-bound).
+    const text = `---
 schema: webclip-annotations/1
 annotates: "Clips/Note.md"
 ---
 
-> some quote   ^anno-MISMATCH
+> some quote   ^anno-NOPE
 
 \`\`\`anno
-id: CANON
+id: OTHER
 status: anchored
 \`\`\`
-
-c
-`).annotations[0];
-    expect(a.id).toBe('CANON');
-    expect(a.record.id).toBe('CANON');
+`;
+    const issues: ParseIssue[] = [];
+    const s = parseSidecar(text, (i) => issues.push(i));
+    expect(s.annotations).toHaveLength(0);
+    expect(issues.some((x) => x.message.includes('NOPE'))).toBe(true);
   });
 
   it('handles a blockquote with a blank quoted line (bare >)', () => {
@@ -441,7 +594,7 @@ describe('malformed input', () => {
     expect(() => parseSidecar('---\nschema: webclip-annotations/1\n')).toThrow(SidecarParseError);
   });
 
-  it('throws SidecarParseError when an anno block lacks a blockquote above it', () => {
+  it('ignores a dangling anno block with no matching quote (dead data)', () => {
     const text = `---
 schema: webclip-annotations/1
 annotates: "Clips/Note.md"
@@ -453,10 +606,13 @@ just prose, no blockquote
 id: ORPHANBLOCK
 status: anchored
 \`\`\`
-
-c
 `;
-    expect(() => parseSidecar(text)).toThrow(SidecarParseError);
+    // No quote references ORPHANBLOCK, so the record is dead data: dropped silently
+    // (no throw, no issue) — the serializer never reproduces it.
+    const issues: ParseIssue[] = [];
+    const s = parseSidecar(text, (i) => issues.push(i));
+    expect(s.annotations).toHaveLength(0);
+    expect(issues).toHaveLength(0);
   });
 
   it('throws SidecarParseError on an unterminated anno block', () => {
@@ -499,5 +655,90 @@ describe('CRLF and BOM tolerance', () => {
     const sidecar = parseSidecar(crlf);
     expect(sidecar.annotations).toHaveLength(2);
     expect(sidecar.annotations[0].quote).toBe('the sentence I care about');
+  });
+});
+
+describe('fault isolation (tolerant parse)', () => {
+  it('skips a malformed unit and keeps the good ones, reporting issues', () => {
+    const text = `---
+schema: webclip-annotations/1
+annotates: "Clips/Note.md"
+---
+
+> good one   ^anno-G1
+
+\`\`\`anno
+id: G1
+status: anchored
+\`\`\`
+
+> bad status   ^anno-B1
+
+\`\`\`anno
+id: B1
+status: bogus
+\`\`\`
+
+> good two   ^anno-G2
+
+\`\`\`anno
+id: G2
+status: anchored
+\`\`\`
+`;
+    const issues: ParseIssue[] = [];
+    const sidecar = parseSidecar(text, (i) => issues.push(i));
+    // The bad unit drops out; the good ones either side survive.
+    expect(sidecar.annotations.map((a) => a.id)).toEqual(['G1', 'G2']);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].message).toContain('B1');
+  });
+
+  it('isolates an unterminated fence, keeping the units before it', () => {
+    const text = `---
+schema: webclip-annotations/1
+annotates: "Clips/Note.md"
+---
+
+> good   ^anno-G
+
+\`\`\`anno
+id: G
+status: anchored
+\`\`\`
+
+> dangling   ^anno-D
+
+\`\`\`anno
+id: D
+status: anchored
+`;
+    const issues: ParseIssue[] = [];
+    const sidecar = parseSidecar(text, (i) => issues.push(i));
+    expect(sidecar.annotations.map((a) => a.id)).toEqual(['G']);
+    expect(issues.some((x) => /nterminated/.test(x.message))).toBe(true);
+  });
+
+  it('still throws (strict) when no onIssue callback is given', () => {
+    const text = `---
+schema: webclip-annotations/1
+annotates: "Clips/Note.md"
+---
+
+> q   ^anno-X
+
+\`\`\`anno
+id: X
+status: bogus
+\`\`\`
+`;
+    expect(() => parseSidecar(text)).toThrow(SidecarParseError);
+  });
+
+  it('keeps frontmatter/schema problems fatal even in tolerant mode', () => {
+    expect(() => parseSidecar('> q\n', () => {})).toThrow(SidecarParseError);
+    expect(() =>
+      parseSidecar('---\nschema: webclip-annotations/2\nannotates: "x"\n---\n', () => {}),
+    ).toThrow(SidecarSchemaError);
   });
 });

@@ -14,11 +14,10 @@
  * All re-resolution is live; nothing trusts a stored coordinate.
  */
 import { TFile, Notice, normalizePath, type App } from 'obsidian';
-import { ulid } from 'ulid';
 
 import type { Sidecar, Annotation, AnnoRecord, SidecarFrontmatter } from '@/model/types';
 import { SCHEMA_VERSION } from '@/model/types';
-import { parseSidecar, serializeSidecar, SidecarSchemaError } from '@/sidecar';
+import { parseSidecar, serializeSidecar, SidecarSchemaError, type ParseIssue } from '@/sidecar';
 import { resolve, type ResolveResult } from '@/resolver';
 import {
   buildStructure,
@@ -29,6 +28,17 @@ import { sidecarPathForSource } from '@/obsidian/sidecar-path';
 import { normalize, normalizeQuote, quoteHash } from '@/text/normalize';
 import { contentHash } from '@/text/hash';
 import type { MarginaliaSettings } from '@/settings';
+
+/** A short base36 (uppercase) annotation id — replaces the long ULID; per-file unique. */
+function shortId(length = 6): string {
+  let s = '';
+  for (let i = 0; i < length; i++) {
+    s += Math.floor(Math.random() * 36)
+      .toString(36)
+      .toUpperCase();
+  }
+  return s;
+}
 
 /** An annotation paired with its live resolution against the current source. */
 export interface ResolvedAnnotation {
@@ -123,8 +133,12 @@ export class AnnotationStore {
     }
 
     let sidecar: Sidecar;
+    const issues: ParseIssue[] = [];
     try {
-      sidecar = parseSidecar(await this.app.vault.cachedRead(sidecarFile));
+      // Read path: tolerant — a malformed unit is skipped and collected, never
+      // blanking the rest of the file's rendering. Only fatal frontmatter/schema
+      // problems throw and land below.
+      sidecar = parseSidecar(await this.app.vault.cachedRead(sidecarFile), (i) => issues.push(i));
     } catch (e) {
       const why =
         e instanceof SidecarSchemaError
@@ -133,6 +147,12 @@ export class AnnotationStore {
       new Notice(`Marginalia: sidecar ${sidecarFile.path} ${why}.`);
       this.forget(sourceFile.path);
       return [];
+    }
+    if (issues.length > 0) {
+      const n = issues.length;
+      new Notice(
+        `Marginalia: skipped ${n} malformed annotation${n > 1 ? 's' : ''} in ${sidecarFile.path}.`,
+      );
     }
 
     const sourceText = await this.app.vault.cachedRead(sourceFile);
@@ -155,6 +175,16 @@ export class AnnotationStore {
       annotation.record.status = result.status === 'anchored' ? 'anchored' : 'orphaned';
       return { annotation, result };
     });
+  }
+
+  /** A short id not already used by this source's loaded annotations. */
+  private freshId(sourcePath: string): string {
+    const taken = new Set(
+      this.entries.get(sourcePath)?.sidecar.annotations.map((a) => a.id) ?? [],
+    );
+    let id = shortId();
+    while (taken.has(id)) id = shortId();
+    return id;
   }
 
   /**
@@ -188,7 +218,7 @@ export class AnnotationStore {
     const headingPath = findEnclosingHeadingPath(cache, from);
 
     const record: AnnoRecord = {
-      id: ulid(),
+      id: this.freshId(sourceFile.path),
       ...(pinId ? { pin: `^${pinId}` } : {}),
       ...(headingPath ? { heading: headingPath } : {}),
       before: contextBefore(sourceText, from, n),

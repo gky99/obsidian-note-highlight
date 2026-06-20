@@ -80,6 +80,9 @@ When adding a module, decide its zone first. If it can be pure, make it pure.
 
 - The **blockquote IS the primary selector** — the human quote and the match needle
   are the same bytes. Never duplicate the quote into the `anno` block.
+- **The `^anno-<id>` ref is the binding key (load-bearing, not cosmetic).** The quote's
+  `^anno-<id>` and the record's `id:` bind quote↔record *by id, not by position*. Ids are
+  short base36 (per-file unique via `store.freshId`), no longer ULIDs.
 - **Never store raw character offsets.** The durable target is quote + before/after
   context + structural pin; resolution is always live against current source bytes.
 - **Orphan, never mis-point.** If the resolver can't find a passage confidently it
@@ -92,6 +95,26 @@ When adding a module, decide its zone first. If it can be pure, make it pure.
   unquoted ISO timestamps into `Date` objects, which corrupts the record on re-serialize.
 - When serializing the `anno` block, the fence length adapts to any backticks in the
   content (`max(3, longestRun+1)`); content is verbatim, never escaped.
+- **Layout: quotes + comments first, `anno` blocks collected at the END of the file.**
+  A unit on disk is `> quote ^anno-<id>` then its comment; the machine `anno` blocks all
+  trail at the bottom and bind back by id (above). The parser's spine is the **quote**
+  (a blockquote ending in `^anno-<id>`), not the fence — it indexes every `anno` block by
+  id, then scans quotes and looks records up. A quote with no record is reported+skipped;
+  a record with no quote is silently dropped (dead data). The serializer emits all `anno`
+  blocks after the units.
+- **Comments are closed by an invisible `[/]:#` terminator** (a link-reference definition
+  that renders to nothing), and the `anno` block notes `comment: true` when prose follows
+  (a *derived* hint — set on serialize, stripped on parse; the prose is the source of
+  truth). The comment follows the **quote** directly (the `anno` block is no longer
+  adjacent to mark its end — hence the terminator matters). A fenced code block or
+  blockquote line is a safeguard boundary; comments support lists + inline but **not**
+  blockquotes/code-blocks (a bare `---` rule *is* allowed). No `---` separator between units.
+- **Parsing is fault-isolated on read, strict on write.** `parseSidecar(text, onIssue)`
+  (read path, `store.load`) skips a malformed unit and reports a `ParseIssue` rather
+  than throwing — one corrupt unit never blanks the whole file's rendering.
+  `parseSidecar(text)` with no callback (write path, `writeSidecar`) stays strict and
+  throws, so a read-modify-write refuses rather than silently clobbering an
+  unparseable unit. Frontmatter/schema errors are always fatal (throw, both modes).
 
 ## Obsidian integration notes
 
@@ -173,11 +196,39 @@ Remaining limitation (acceptable, by design): a quote spanning **block** boundar
 paint — the post-processor and the concat are per-element. Offset-accurate reading-mode
 highlighting remains a **non-goal** (Design.md §7.2); CM6 is the authoritative path.
 
+### Sidecar comment format + parse coupling — RESOLVED (2026-06-20)
+Reworked this session (see Design.md §5.1, §5.4, §10 #11, and the invariant bullets above).
+Two distinct problems were conflated under "rendering breaks when the file structure
+changes," and only the second was a real bug:
+- **Comment delimiting was positional.** Now a comment is closed by an explicit, invisible
+  `[/]:#` terminator (a link-reference definition that renders to nothing — chosen over
+  `---`/HTML/`%%` for being small, plain-Markdown, and portable), the `anno` block notes
+  `comment: true`, and a code-fence/blockquote line is a safeguard so a comment can't run
+  away into the next unit. Comments support lists + inline but not blockquotes/code-blocks;
+  a bare `---` is now ordinary content. The cosmetic `---` unit separator was dropped (a
+  comment-less unit's forward scan would absorb it).
+- **Parse was all-or-nothing and bound by raw adjacency.** Now `parseSidecar(text, onIssue?)`
+  is fault-isolated on read / strict on write. One corrupt unit no longer blanks the file.
+- **`anno` blocks decoupled from their quotes (later in the session).** Binding is now
+  purely by id (`^anno-<id>` ↔ `id:`), the parser's spine is the **quote** (not the fence),
+  and the serializer collects all `anno` blocks at the **end of the file** — quotes +
+  comments read together, machine data trails. The `^anno-<id>` ref is now load-bearing.
+  Ids shortened from ULID to short base36 (`store.freshId`); the `ulid` dep was removed.
+
+**Open follow-up — strict-write refuses on a corrupt unit.** Because `writeSidecar` parses
+strict, a single unparseable unit blocks *all* writes to that sidecar (refuse, never
+clobber). Safer than the old behavior but a real UX wart. Option if it bites: have the
+write path preserve unparseable units verbatim (round-trip their raw text) instead of
+refusing.
+
 ## Status / next step
 
-Core is done and tested. The runtime layers build and typecheck; the selection toolbar,
-custom palette, custom save location, and aside card controls were added this round.
-**Verified working in-vault:** highlighting via the toolbar in Live Preview, the aside
-panel, and reading-mode highlight rendering (incl. across inline formatting/links — see
-the resolved issue above, covered by the e2e). Stretch goal still open: marginalia card
-alignment via `coordsAtPos` (Design.md §7.3).
+Core is done and tested (177 unit tests). The runtime layers build and typecheck; the
+selection toolbar, custom palette, custom save location, and aside card controls are in.
+**This session** reworked the sidecar format: `[/]:#` comment terminator, fault-isolated
+parsing, and then **decoupled `anno` blocks to the end of the file** (bound by id) with
+**short base36 ids** — see the RESOLVED note above. **Verified working in-vault:** highlighting
+via the toolbar in Live Preview, the aside panel, and reading-mode highlight rendering
+(incl. across inline formatting/links — covered by the e2e). Open items: the strict-write
+tradeoff (above) and the marginalia card-alignment stretch goal via `coordsAtPos`
+(Design.md §7.3).

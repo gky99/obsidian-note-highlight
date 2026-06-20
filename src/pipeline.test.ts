@@ -34,6 +34,23 @@ clipped: 2026-06-19
 
 > the sentence I care about ^anno-01J8X2
 
+A note about the sentence.
+
+[/]:#
+
+> ## A quoted heading
+> followed by text with **strong** emphasis ^anno-01J8X9
+
+This reference spans a heading and the paragraph under it (§6.4).
+
+[/]:#
+
+> a passage that no longer exists anywhere ^anno-01J8XZ
+
+This one should orphan.
+
+[/]:#
+
 ${F}anno
 id: 01J8X2
 heading: Article
@@ -42,14 +59,8 @@ after: " right here."
 qhash: deadbeef
 status: anchored
 color: yellow
+comment: true
 ${F}
-
-A note about the sentence.
-
----
-
-> ## A quoted heading
-> followed by text with **strong** emphasis ^anno-01J8X9
 
 ${F}anno
 id: 01J8X9
@@ -59,13 +70,8 @@ after: " and more."
 qhash: cafebabe
 status: anchored
 color: green
+comment: true
 ${F}
-
-This reference spans a heading and the paragraph under it (§6.4).
-
----
-
-> a passage that no longer exists anywhere ^anno-01J8XZ
 
 ${F}anno
 id: 01J8XZ
@@ -73,9 +79,8 @@ heading: Methods
 qhash: 00000000
 status: anchored
 color: blue
+comment: true
 ${F}
-
-This one should orphan.
 `;
 
 describe('core pipeline (sidecar → resolve → serialize)', () => {
