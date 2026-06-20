@@ -645,17 +645,38 @@ no write-immediately command). The preview (`preview-modal.ts`) has two layouts:
 
 - **single clip** — a meta bar (target sidecar + counts), the clip's frontmatter as a
   read-only Properties table, then **one card per highlight: the colored quote and its rendered
-  comment**. Deliberately *not* a note outline — the source plugin previewed a reconstructed
-  reading note (headings + body), but a Marginalia sidecar stores only quotes + comments, so
-  the preview mirrors exactly that (the §15.1 "the sidecar *is* the note" rule, applied to the
-  preview surface).
-- **all clips** — a dry-run report: stat cards (highlights / notes / nothing-new) and a
-  per-clip entry list (file icon, title, count chips).
+  comment**, followed by a **"Not located" section** listing any marks whose text couldn't be
+  re-anchored (muted, dashed, flagged with a warning icon *beside* — never inside — the quote).
+  Deliberately *not* a note outline — the source plugin previewed a reconstructed reading note
+  (headings + body), but a Marginalia sidecar stores only quotes + comments, so the preview
+  mirrors exactly that (the §15.1 "the sidecar *is* the note" rule, applied to the preview surface).
+- **all clips** — a dry-run report: stat cards (highlights / notes / **not-located** /
+  nothing-new) and a per-clip entry list (file icon, title, count chips). A clip with *only*
+  un-located marks is still listed (warning icon), and each entry expands to show its missing
+  quotes inline.
 
 **Lesson — the preview is a faithful mock of the result, so it must mirror the *output model*,
 not the source tool's.** Porting the exporter's note-render preview verbatim would have shown
 a heading skeleton Marginalia never produces; the preview's job is to answer "what will exist
 after I confirm?", which here is a flat set of highlighted quotes + comments.
+
+**Show what *won't* be imported, too.** A locate→write pipeline that silently drops misses
+reads as "imported everything." The preview surfaces the un-located marks — especially in the
+all-clips run, where a miss would otherwise vanish among many files — so the best-effort
+locate (§15.2, §4.6) stays honest. They are shown, never written. The warning flag sits beside
+the quote (its own element), not prepended into it, so it can't disturb the text it annotates.
+
+**Lesson — to make Import the default focus, override `open()`; don't focus in `onOpen()`.**
+Obsidian's `Modal.open()` autofocuses the *first focusable element* in the modal — here the
+Cancel button, which is added to the `Setting` before Import — via an internal `tg(modalEl)`
+call that runs *after* `onOpen()` returns. So any `buttonEl.focus()` set during `onOpen` is
+clobbered one statement later, leaving Cancel focused (Enter cancels). The fix focuses Import
+in an `open()` override, *after* `super.open()`: `Modal.open()` is fully synchronous (it does
+not await `onOpen`, and the autofocus is its last focus-related call), so when `super.open()`
+returns the autofocus has already run and our focus wins — deterministically, with **no timer,
+no `Enter` keybinding, and no DOM/`tabindex` reordering** (each of those either races the
+lifecycle or fights it). Verified both ways by `test/playground/specs/import-focus.e2e.ts`
+against real Obsidian 1.12.7 — it passes with the override and fails (Cancel focused) without it.
 
 ### 15.5 Settings & shared UI, ported to Marginalia's vocabulary — but only what applies
 

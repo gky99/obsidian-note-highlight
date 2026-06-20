@@ -571,6 +571,42 @@
   margin-bottom: 0;
 }
 
+/* could-not-be-located highlights: shown but flagged, never imported */
+.mrg-import-missing-note {
+  margin: 0 0 8px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+}
+
+.mrg-import-hl.is-missing {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  border-style: dashed;
+  background: var(--background-primary);
+}
+
+.mrg-import-hl.is-missing .mrg-import-quote {
+  flex: 1 1 auto;
+  min-width: 0;
+  border-left-style: dashed;
+  color: var(--text-muted);
+}
+
+/* the flag sits beside the quote, not inside it, so it can't disturb the text */
+.mrg-import-missing-icon {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  margin-top: 1px;
+  color: var(--color-orange);
+}
+
+.mrg-import-missing-icon .svg-icon {
+  width: var(--icon-s);
+  height: var(--icon-s);
+}
+
 /* dry-run: stat cards */
 .mrg-import-stats {
   display: flex;
@@ -591,6 +627,14 @@
 
 .mrg-stat.is-create {
   border-color: var(--interactive-accent);
+}
+
+.mrg-stat.is-warn {
+  border-color: var(--color-orange);
+}
+
+.mrg-stat.is-warn .mrg-stat-value {
+  color: var(--color-orange);
 }
 
 .mrg-stat-value {
@@ -621,8 +665,8 @@
 
 .mrg-entry {
   display: flex;
-  align-items: center;
-  gap: 10px;
+  flex-direction: column;
+  gap: 8px;
   padding: 8px 12px;
 }
 
@@ -630,11 +674,26 @@
   border-bottom: 1px solid var(--background-modifier-border);
 }
 
+.mrg-entry-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* the located highlights of an all-clips entry that only has misses */
+.mrg-entry-missing {
+  padding-left: 26px;
+}
+
 .mrg-entry-icon {
   display: flex;
   flex: 0 0 auto;
   align-items: center;
   color: var(--interactive-accent);
+}
+
+.mrg-entry.is-missing-only .mrg-entry-icon {
+  color: var(--color-orange);
 }
 
 .mrg-entry-icon .svg-icon {

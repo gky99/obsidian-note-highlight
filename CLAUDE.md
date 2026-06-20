@@ -251,8 +251,16 @@ any note whose frontmatter carries the page's source URL (`source`/`url`/…).
     only **on confirm** calls `store.createHighlights` (no write-immediately command). The
     modal has two layouts: **single clip** = meta bar + the clip's frontmatter as a Properties
     table + one card per highlight (colored quote + rendered comment — flat, *no* heading
-    outline, since the sidecar stores only quotes+comments); **all clips** = stat cards +
-    per-clip entry list (icon, title, count chips). Confirm is the focused default.
+    outline, since the sidecar stores only quotes+comments) + a **"Not located"** section for
+    marks that couldn't be re-anchored; **all clips** = stat cards (incl. *not-located*) +
+    per-clip entry list (icon, title, count chips) that lists each clip's un-located quotes
+    inline (clips with *only* misses are still shown). **Un-located marks are displayed but
+    never written** — the warning flag sits *beside* the quote, not inside it, so it can't
+    corrupt the shown text (Design.md §15.4). **Import is the focused default** via an `open()`
+    override that focuses the button *after* `super.open()` — Obsidian's `Modal.open()`
+    autofocuses the first focusable element (Cancel) *after* `onOpen()` returns, so focusing in
+    `onOpen` is clobbered; do **not** add an Enter keybinding (Enter already confirms the
+    focused button). Guarded by `test/playground/specs/import-focus.e2e.ts` (Design.md §15.4).
   - Settings: `webHighlightsFolder` + `clipsFolder`; commands **Import Web Highlights into
     current note** / **into all clips** (`main.ts`) — both open the preview.
 - **Not automatically verified in-vault** (runtime layers aren't unit-tested here, per
@@ -357,6 +365,13 @@ Core is done and tested. The runtime layers build and typecheck; the selection t
 custom palette, custom save location, and aside card controls are in. Recent work, newest
 first:
 
+- **Import preview: show un-located marks + fix default focus** (Design.md §15.4). The preview
+  now displays marks it couldn't re-anchor (a "Not located" section / per-clip inline list,
+  flag beside the quote) instead of only counting them — shown, never written. And **Import is
+  the focused default**: the focus must be set in an `open()` override *after* `super.open()`,
+  because Obsidian's `Modal.open()` autofocuses the first focusable element (Cancel) *after*
+  `onOpen()`. First e2e for a runtime layer here: `test/playground/specs/import-focus.e2e.ts`
+  (passes with the fix, fails without — verified on real Obsidian 1.12.7).
 - **Web Highlights import** (`src/import/`, see its section): export → sidecar annotations,
   preview-first, non-destructive, idempotent; matching/offset core verified 17/17 against the
   real sample (its in-vault runtime path is not auto-tested, per convention). Plus the

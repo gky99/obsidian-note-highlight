@@ -28,6 +28,8 @@ import { planImport } from './plan';
 import { ImportPreviewModal } from './preview-modal';
 import {
   colorsInExport,
+  markColor,
+  markComment,
   marksForUrl,
   normalizeUrl,
   parseExport,
@@ -46,6 +48,13 @@ interface PlannedHighlightView {
   color: string;
 }
 
+/** A mark that couldn't be located in the clip — shown in the preview, never written. */
+interface MissingHighlightView {
+  quote: string;
+  comment: string;
+  color: string;
+}
+
 /** A clip's planned import, computed without writing — the unit the preview shows. */
 interface ClipPlan {
   clip: TFile;
@@ -53,8 +62,8 @@ interface ClipPlan {
   highlights: PlannedHighlightView[];
   /** Marks dropped because their passage is already highlighted. */
   skipped: number;
-  /** Marks whose text could not be located in the clip. */
-  unmatched: number;
+  /** Marks whose text could not be located in the clip (shown, not imported). */
+  missing: MissingHighlightView[];
   /** Total marks the export had for this clip's URL. */
   total: number;
 }
@@ -117,7 +126,7 @@ export class WebHighlightsImporter {
   private async planClip(clip: TFile, data: WebHighlightsExport): Promise<ClipPlan> {
     const url = urlFromMeta(this.app.metadataCache.getFileCache(clip)?.frontmatter);
     const marks = url ? marksForUrl(data, url) : [];
-    if (marks.length === 0) return { clip, highlights: [], skipped: 0, unmatched: 0, total: 0 };
+    if (marks.length === 0) return { clip, highlights: [], skipped: 0, missing: [], total: 0 };
 
     const sourceText = await this.app.vault.cachedRead(clip);
     // Load so the plan can de-overlap against existing highlights (and so the apply
@@ -140,7 +149,11 @@ export class WebHighlightsImporter {
         color: p.color,
       })),
       skipped: plan.skipped,
-      unmatched: plan.unmatched.length,
+      missing: plan.unmatched.map((m) => ({
+        quote: (m.text ?? '').replace(/\s+/g, ' ').trim(),
+        comment: markComment(m),
+        color: markColor(m) ?? this.settings.defaultColor,
+      })),
       total: marks.length,
     };
   }
@@ -158,12 +171,13 @@ export class WebHighlightsImporter {
         sourcePath: plan.clip.path,
         frontmatter: this.app.metadataCache.getFileCache(plan.clip)?.frontmatter ?? null,
         skipped: plan.skipped,
-        unmatched: plan.unmatched,
+        unmatched: plan.missing.length,
         highlights: plan.highlights.map((h) => ({
           quote: h.quote,
           comment: h.comment,
           color: h.color,
         })),
+        missing: plan.missing,
       },
     }).open();
   }
@@ -180,7 +194,7 @@ export class WebHighlightsImporter {
           name: p.clip.basename,
           create: p.highlights.length,
           skipped: p.skipped,
-          unmatched: p.unmatched,
+          missing: p.missing,
         })),
         noteCount: plans.filter((p) => p.highlights.length > 0).length,
       },

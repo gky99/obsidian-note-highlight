@@ -43,6 +43,8 @@ export interface SinglePreview {
   skipped: number;
   unmatched: number;
   highlights: PreviewHighlight[];
+  /** Highlights whose text could not be located in the note (won't be imported). */
+  missing: PreviewHighlight[];
 }
 
 /** One clip's row in the dry-run report. */
@@ -50,7 +52,8 @@ export interface DryRunEntry {
   name: string;
   create: number;
   skipped: number;
-  unmatched: number;
+  /** Highlights whose text could not be located in the clip (won't be imported). */
+  missing: PreviewHighlight[];
 }
 
 /** All-clips dry-run payload. */
@@ -72,12 +75,25 @@ export interface ImportPreviewOptions {
 
 export class ImportPreviewModal extends Modal {
   private readonly component = new Component();
+  private importButton?: ButtonComponent;
 
   constructor(
     app: App,
     private readonly opts: ImportPreviewOptions,
   ) {
     super(app);
+  }
+
+  /**
+   * Make Import the focused (default) action. Obsidian's `Modal.open()` autofocuses
+   * the first focusable element — here the Cancel button — *after* `onOpen()` returns
+   * (the `tg(modalEl)` call in its source), which would clobber a focus set during
+   * `onOpen`. Running `super.open()` first lets that autofocus happen, then we claim
+   * focus for Import. open() is fully synchronous, so this is deterministic — no timer.
+   */
+  open(): void {
+    super.open();
+    if (this.opts.totalCreate > 0) this.importButton?.buttonEl.focus();
   }
 
   onOpen(): void {
@@ -116,18 +132,28 @@ export class ImportPreviewModal extends Modal {
     body.createEl('h4', { cls: 'mrg-import-section', text: 'Highlights' });
     if (s.highlights.length === 0) {
       body.createDiv({ cls: 'mrg-import-empty', text: 'No new highlights to import.' });
-      return;
-    }
-    const list = body.createDiv({ cls: 'mrg-import-hls' });
-    for (const h of s.highlights) {
-      const item = list.createDiv({ cls: 'mrg-import-hl' });
-      const quote = item.createDiv({ cls: 'mrg-import-quote' });
-      quote.style.borderLeftColor = renderColor(h.color).solid;
-      quote.setText(h.quote);
-      if (h.comment.trim().length > 0) {
-        const comment = item.createDiv({ cls: 'mrg-import-comment' });
-        void MarkdownRenderer.render(this.app, h.comment, comment, s.sourcePath, this.component);
+    } else {
+      const list = body.createDiv({ cls: 'mrg-import-hls' });
+      for (const h of s.highlights) {
+        const item = list.createDiv({ cls: 'mrg-import-hl' });
+        const quote = item.createDiv({ cls: 'mrg-import-quote' });
+        quote.style.borderLeftColor = renderColor(h.color).solid;
+        quote.setText(h.quote);
+        if (h.comment.trim().length > 0) {
+          const comment = item.createDiv({ cls: 'mrg-import-comment' });
+          void MarkdownRenderer.render(this.app, h.comment, comment, s.sourcePath, this.component);
+        }
       }
+    }
+
+    if (s.missing.length > 0) {
+      body.createEl('h4', { cls: 'mrg-import-section', text: `Not located (${s.missing.length})` });
+      body.createDiv({
+        cls: 'mrg-import-missing-note',
+        text: 'These highlights could not be found in the note and won’t be imported.',
+      });
+      const list = body.createDiv({ cls: 'mrg-import-hls' });
+      for (const h of s.missing) this.renderMissing(list, h);
     }
   }
 
@@ -135,25 +161,35 @@ export class ImportPreviewModal extends Modal {
 
   private renderAll(body: HTMLElement, a: AllPreview): void {
     const total = this.opts.totalCreate;
+    const missingTotal = a.entries.reduce((n, e) => n + e.missing.length, 0);
     const stats = body.createDiv({ cls: 'mrg-import-stats' });
     stat(stats, total, total === 1 ? 'highlight' : 'highlights', 'is-create');
     stat(stats, a.noteCount, a.noteCount === 1 ? 'note' : 'notes');
-    const nothing = a.entries.filter((e) => e.create === 0).length;
+    if (missingTotal) stat(stats, missingTotal, 'not located', 'is-warn');
+    const nothing = a.entries.filter((e) => e.create === 0 && e.missing.length === 0).length;
     if (nothing) stat(stats, nothing, 'nothing new');
 
-    const withNew = a.entries.filter((e) => e.create > 0);
-    if (withNew.length === 0) {
+    // Show any clip that gains highlights OR has ones we couldn't locate — the
+    // latter is why this list matters across many clips: it surfaces silent misses.
+    const shown = a.entries.filter((e) => e.create > 0 || e.missing.length > 0);
+    if (shown.length === 0) {
       body.createDiv({ cls: 'mrg-import-empty', text: 'Nothing new to import.' });
       return;
     }
     const list = body.createDiv({ cls: 'mrg-import-entries' });
-    for (const e of withNew) {
+    for (const e of shown) {
       const row = list.createDiv({ cls: 'mrg-entry' });
-      setIcon(row.createDiv({ cls: 'mrg-entry-icon' }), 'file-plus');
-      row.createDiv({ cls: 'mrg-entry-name', text: e.name });
-      const chips = row.createDiv({ cls: 'mrg-entry-chips' });
-      chip(chips, `${e.create} highlight${e.create === 1 ? '' : 's'}`);
-      if (e.unmatched) chip(chips, `${e.unmatched} not located`, 'is-warn');
+      if (e.create === 0) row.addClass('is-missing-only');
+      const head = row.createDiv({ cls: 'mrg-entry-head' });
+      setIcon(head.createDiv({ cls: 'mrg-entry-icon' }), e.create > 0 ? 'file-plus' : 'file-warning');
+      head.createDiv({ cls: 'mrg-entry-name', text: e.name });
+      const chips = head.createDiv({ cls: 'mrg-entry-chips' });
+      if (e.create > 0) chip(chips, `${e.create} highlight${e.create === 1 ? '' : 's'}`);
+      if (e.missing.length) chip(chips, `${e.missing.length} not located`, 'is-warn');
+      if (e.missing.length > 0) {
+        const missing = row.createDiv({ cls: 'mrg-entry-missing mrg-import-hls' });
+        for (const h of e.missing) this.renderMissing(missing, h);
+      }
     }
     if (nothing) {
       body.createDiv({
@@ -167,11 +203,10 @@ export class ImportPreviewModal extends Modal {
 
   private renderButtons(contentEl: HTMLElement): void {
     const total = this.opts.totalCreate;
-    let importButton: ButtonComponent | undefined;
     new Setting(contentEl)
       .addButton((b) => b.setButtonText('Cancel').onClick(() => this.close()))
       .addButton((b) => {
-        importButton = b;
+        this.importButton = b;
         b.setButtonText(total > 0 ? `Import ${total} highlight${total === 1 ? '' : 's'}` : 'Import')
           .setCta()
           .setDisabled(total === 0)
@@ -181,8 +216,16 @@ export class ImportPreviewModal extends Modal {
           });
         return b;
       });
-    // Make Import the popup default: focus it so Enter confirms (not cancel).
-    if (total > 0) importButton?.buttonEl.focus();
+    // Import is focused after open() finishes — see the open() override.
+  }
+
+  /** A could-not-be-located highlight: its quote, muted, flagged out-of-line, never imported. */
+  private renderMissing(list: HTMLElement, h: PreviewHighlight): void {
+    const item = list.createDiv({ cls: 'mrg-import-hl is-missing' });
+    setIcon(item.createDiv({ cls: 'mrg-import-missing-icon' }), 'alert-triangle');
+    const quote = item.createDiv({ cls: 'mrg-import-quote' });
+    quote.style.borderLeftColor = renderColor(h.color).solid;
+    quote.setText(h.quote);
   }
 }
 
