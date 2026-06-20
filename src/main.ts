@@ -41,6 +41,7 @@ import {
   MarginaliaSettingTab,
   SelectionToolbar,
   ScrollSync,
+  SidecarCollisionModal,
   type SettingsHost,
   type HighlightRequest,
   type ExistingHighlight,
@@ -64,6 +65,8 @@ export default class MarginaliaPlugin extends Plugin implements SettingsHost {
   async onload(): Promise<void> {
     await this.loadSettings();
     this.store = new AnnotationStore(this.app, this.settings);
+    // Prompt on a flat-folder sidecar name collision (Design.md §4.1).
+    this.store.onCollision = (collision) => new SidecarCollisionModal(this.app, collision).choose();
 
     // --- CM6 editor extension: highlights + anno hiding + reverse nav -----
     this.registerEditorExtension(
@@ -194,12 +197,18 @@ export default class MarginaliaPlugin extends Plugin implements SettingsHost {
 
   /** The source note an open file is "about" (a sidecar maps back to its source). */
   private resolveSourcePath(path: string): string {
-    if (isSidecarPath(path, this.settings.sidecarSuffix)) {
-      return (
-        sourcePathForSidecar(path, this.settings.sidecarSuffix, this.settings.sidecarFolder) ?? path
-      );
+    if (!isSidecarPath(path, this.settings.sidecarSuffix)) return path;
+    // Prefer the sidecar's own `annotates` record: it is the authoritative link
+    // and survives a custom sidecar folder, which flattens sidecars by basename
+    // so the name-based inverse below can no longer recover the source directory.
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (file instanceof TFile) {
+      const annotates = this.app.metadataCache.getFileCache(file)?.frontmatter?.annotates;
+      if (typeof annotates === 'string' && annotates) return annotates;
     }
-    return path;
+    return (
+      sourcePathForSidecar(path, this.settings.sidecarSuffix, this.settings.sidecarFolder) ?? path
+    );
   }
 
   /**
@@ -251,8 +260,15 @@ export default class MarginaliaPlugin extends Plugin implements SettingsHost {
     const activePath = this.app.workspace.getActiveFile()?.path;
     if (!activePath) return;
     const sourcePath = this.resolveSourcePath(activePath);
-    const sidecarPath = this.store.sidecarPathFor(sourcePath);
-    if (file.path !== sourcePath && file.path !== sidecarPath) return;
+    // The change is relevant if it's the source itself, the canonical sidecar name
+    // (covers a not-yet-loaded create / a shared sidecar), or any sidecar whose
+    // `annotates` points at this source (covers a disambiguated collision sidecar).
+    const isSidecar = isSidecarPath(file.path, this.settings.sidecarSuffix);
+    const relevant =
+      file.path === sourcePath ||
+      file.path === this.store.sidecarPathFor(sourcePath) ||
+      (isSidecar && this.resolveSourcePath(file.path) === sourcePath);
+    if (!relevant) return;
     const sourceFile = this.app.vault.getAbstractFileByPath(sourcePath);
     if (sourceFile instanceof TFile) void this.store.load(sourceFile);
   }

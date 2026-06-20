@@ -54,9 +54,42 @@ interface SourceEntry {
 
 type ChangeListener = (sourcePath: string) => void;
 
+/** The user's resolution when a new sidecar would collide with another note's. */
+export type CollisionChoice = 'continue' | 'suffix' | 'cancel';
+
+/** Context handed to {@link AnnotationStore.onCollision} so it can prompt the user. */
+export interface SidecarCollision {
+  /** The source note that wants to store annotations. */
+  sourcePath: string;
+  /** The canonical sidecar path that is already taken. */
+  existingSidecarPath: string;
+  /** The other note that owns the existing sidecar (its `annotates`), if known. */
+  existingAnnotates: string | null;
+}
+
+/** Asks the user how to resolve a sidecar name collision; wired to a modal in `main.ts`. */
+export type CollisionResolver = (collision: SidecarCollision) => Promise<CollisionChoice>;
+
 export class AnnotationStore {
   private entries = new Map<string, SourceEntry>();
   private listeners = new Set<ChangeListener>();
+  /**
+   * Session-sticky binding of a source to the exact sidecar path we resolved or
+   * created for it. Bridges the metadataCache lag right after a `vault.create`,
+   * and — once set — lets repeat writes skip the collision prompt. Only set when
+   * ownership is certain (own canonical / own disambiguated / a committed choice),
+   * never from a shared-fallback read, so a *first* write to a colliding source
+   * still prompts. Rebuilt from disk after a reload; cleared on {@link forget}.
+   */
+  private resolvedSidecar = new Map<string, string>();
+
+  /**
+   * Optional collision prompt. Invoked only when a source's *first* sidecar would
+   * land on a canonical name already owned by a different note (basename clash in
+   * a flat sidecar folder). Unset → default to {@link CollisionChoice} `suffix`
+   * (data-preserving, no prompt).
+   */
+  onCollision?: CollisionResolver;
 
   constructor(
     private readonly app: App,
@@ -73,16 +106,82 @@ export class AnnotationStore {
     for (const fn of this.listeners) fn(sourcePath);
   }
 
-  /** Vault path of the sidecar that would annotate `sourcePath`. */
+  /** Canonical vault path of the sidecar that would annotate `sourcePath`. */
   sidecarPathFor(sourcePath: string): string {
     return normalizePath(
       sidecarPathForSource(sourcePath, this.settings.sidecarSuffix, this.settings.sidecarFolder),
     );
   }
 
-  private sidecarFileFor(sourcePath: string): TFile | null {
-    const f = this.app.vault.getAbstractFileByPath(this.sidecarPathFor(sourcePath));
+  /** The Nth numbered sidecar slot for a source in folder mode (§4.1). */
+  private suffixedPath(sourcePath: string, n: number): string {
+    return normalizePath(
+      sidecarPathForSource(sourcePath, this.settings.sidecarSuffix, this.settings.sidecarFolder, n),
+    );
+  }
+
+  /**
+   * Probe numbered sidecar slots `-1, -2, …` for this source. Returns the slot we
+   * *own* (its `annotates` matches), if any, plus the first *free* slot to claim.
+   * Stops at the first empty slot — safe because the plugin never auto-deletes a
+   * sidecar file (emptied ones persist), so a numbered cluster has no gaps.
+   */
+  private probeSuffixed(sourcePath: string): { owned: TFile | null; firstFree: string } {
+    const MAX = 1000; // runaway guard; real clusters are tiny
+    for (let n = 1; n <= MAX; n++) {
+      const path = this.suffixedPath(sourcePath, n);
+      const file = this.fileAt(path);
+      if (!file) return { owned: null, firstFree: path };
+      if (this.annotatesOf(file) === sourcePath) return { owned: file, firstFree: path };
+    }
+    return { owned: null, firstFree: this.suffixedPath(sourcePath, MAX) };
+  }
+
+  /** True when a custom sidecar folder is configured (the only place collisions arise). */
+  private folderMode(): boolean {
+    return this.settings.sidecarFolder.replace(/^\/+|\/+$/g, '') !== '';
+  }
+
+  private fileAt(path: string): TFile | null {
+    const f = this.app.vault.getAbstractFileByPath(path);
     return f instanceof TFile ? f : null;
+  }
+
+  /** The source a sidecar declares it annotates (from cached frontmatter), if any. */
+  private annotatesOf(file: TFile): string | null {
+    const a = this.app.metadataCache.getFileCache(file)?.frontmatter?.annotates;
+    return typeof a === 'string' && a ? a : null;
+  }
+
+  private bind(sourcePath: string, file: TFile): TFile {
+    this.resolvedSidecar.set(sourcePath, file.path);
+    return file;
+  }
+
+  /**
+   * Locate the sidecar file holding `sourcePath`'s annotations. In a flat sidecar
+   * folder two same-named notes can collide on the canonical name, so the lookup
+   * is ownership-aware: prefer our own canonical sidecar, then our own numbered
+   * one (found by probing slots and matching `annotates`), and only then fall back
+   * to a *shared* canonical (the "Continue" outcome / a same-named note that never
+   * opted out). The shared fallback is intentionally not bound, so a first write
+   * to it still prompts.
+   */
+  private sidecarFileFor(sourcePath: string): TFile | null {
+    const bound = this.resolvedSidecar.get(sourcePath);
+    if (bound) {
+      const f = this.fileAt(bound);
+      if (f) return f;
+      this.resolvedSidecar.delete(sourcePath);
+    }
+
+    const canonical = this.fileAt(this.sidecarPathFor(sourcePath));
+    if (!this.folderMode()) return canonical ? this.bind(sourcePath, canonical) : null;
+
+    if (canonical && this.annotatesOf(canonical) === sourcePath) return this.bind(sourcePath, canonical);
+    const { owned } = this.probeSuffixed(sourcePath);
+    if (owned) return this.bind(sourcePath, owned); // our own numbered sidecar
+    return canonical; // shared fallback (unbound) or null
   }
 
   /** Does a sidecar file exist for this source (by naming convention)? */
@@ -117,6 +216,7 @@ export class AnnotationStore {
 
   /** Drop any cached state for a source (e.g. on file delete). */
   forget(sourcePath: string): void {
+    this.resolvedSidecar.delete(sourcePath);
     if (this.entries.delete(sourcePath)) this.emit(sourcePath);
   }
 
@@ -230,9 +330,10 @@ export class AnnotationStore {
     };
     const annotation: Annotation = { id: record.id, quote, record, comment: '' };
 
-    await this.writeSidecar(sourceFile, sourceText, (s) => {
+    const written = await this.writeSidecar(sourceFile, sourceText, (s) => {
       s.annotations.push(annotation);
     });
+    if (!written) return null; // user cancelled at the collision prompt
     await this.load(sourceFile);
     return annotation;
   }
@@ -265,30 +366,103 @@ export class AnnotationStore {
     };
   }
 
-  /** Atomic read-modify-write of a sidecar, creating it if absent (§9). */
+  /** Atomic read-modify-write of an existing sidecar (§9). */
+  private async rmw(file: TFile, mutate: (s: Sidecar) => void): Promise<void> {
+    await this.app.vault.process(file, (text) => {
+      const sidecar = parseSidecar(text);
+      mutate(sidecar);
+      return serializeSidecar(sidecar);
+    });
+  }
+
+  /** Create a fresh sidecar at `path` annotating `sourcePath`. */
+  private async createAt(
+    path: string,
+    sourcePath: string,
+    sourceText: string,
+    mutate: (s: Sidecar) => void,
+  ): Promise<void> {
+    const sidecar: Sidecar = {
+      frontmatter: this.newFrontmatter(sourcePath, sourceText),
+      annotations: [],
+    };
+    mutate(sidecar);
+    await this.ensureParentFolder(path);
+    await this.app.vault.create(path, serializeSidecar(sidecar));
+  }
+
+  /**
+   * Write a source's sidecar, creating it if absent (§9). Resolves a flat-folder
+   * basename collision via {@link onCollision}: when this source has no sidecar
+   * yet and the canonical name is already owned by a *different* note, the user
+   * chooses to share that file (`continue`), save to a disambiguated name
+   * (`suffix`), or abort (`cancel`). Returns `false` only on cancel.
+   */
   private async writeSidecar(
     sourceFile: TFile,
     sourceText: string,
     mutate: (s: Sidecar) => void,
-  ): Promise<void> {
-    const existing = this.sidecarFileFor(sourceFile.path);
+  ): Promise<boolean> {
+    const source = sourceFile.path;
     try {
-      if (existing) {
-        await this.app.vault.process(existing, (text) => {
-          const sidecar = parseSidecar(text);
-          mutate(sidecar);
-          return serializeSidecar(sidecar);
-        });
-      } else {
-        const sidecar: Sidecar = {
-          frontmatter: this.newFrontmatter(sourceFile.path, sourceText),
-          annotations: [],
-        };
-        mutate(sidecar);
-        const sidecarPath = this.sidecarPathFor(sourceFile.path);
-        await this.ensureParentFolder(sidecarPath);
-        await this.app.vault.create(sidecarPath, serializeSidecar(sidecar));
+      // A committed binding (own sidecar / prior choice) → write straight through.
+      const bound = this.resolvedSidecar.get(source);
+      const boundFile = bound ? this.fileAt(bound) : null;
+      if (boundFile) {
+        await this.rmw(boundFile, mutate);
+        return true;
       }
+
+      const canonical = this.sidecarPathFor(source);
+      const canonicalFile = this.fileAt(canonical);
+
+      // Alongside mode: the canonical name embeds the full source path → unique,
+      // so it is always ours; never a collision.
+      if (!this.folderMode()) {
+        if (canonicalFile) await this.rmw(canonicalFile, mutate);
+        else await this.createAt(canonical, source, sourceText, mutate);
+        this.resolvedSidecar.set(source, canonical);
+        return true;
+      }
+
+      // Folder mode. Our own canonical sidecar?
+      if (canonicalFile && this.annotatesOf(canonicalFile) === source) {
+        await this.rmw(canonicalFile, mutate);
+        this.bind(source, canonicalFile);
+        return true;
+      }
+      // Our own numbered sidecar from a past collision (found by probing annotates)?
+      const { owned, firstFree } = this.probeSuffixed(source);
+      if (owned) {
+        await this.rmw(owned, mutate);
+        this.bind(source, owned);
+        return true;
+      }
+      // Canonical name taken by a different note → ask how to resolve the clash.
+      if (canonicalFile) {
+        const choice: CollisionChoice = this.onCollision
+          ? await this.onCollision({
+              sourcePath: source,
+              existingSidecarPath: canonical,
+              existingAnnotates: this.annotatesOf(canonicalFile),
+            })
+          : 'suffix';
+        if (choice === 'cancel') return false;
+        if (choice === 'suffix') {
+          await this.createAt(firstFree, source, sourceText, mutate);
+          this.resolvedSidecar.set(source, firstFree);
+          return true;
+        }
+        // 'continue' → share the existing sidecar.
+        await this.rmw(canonicalFile, mutate);
+        this.bind(source, canonicalFile);
+        return true;
+      }
+
+      // Canonical name is free → become its owner.
+      await this.createAt(canonical, source, sourceText, mutate);
+      this.resolvedSidecar.set(source, canonical);
+      return true;
     } catch (e) {
       new Notice(`Marginalia: failed to write sidecar — ${String(e)}`);
       throw e;

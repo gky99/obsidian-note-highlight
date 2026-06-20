@@ -33,7 +33,7 @@ The single most important rule. Two zones:
 - `src/color.ts` — color resolution shared by every renderer: a stored color is a built-in token (`yellow`…`orange`, theme-aware CSS class) OR an arbitrary `#hex` (inline style). `renderColor()` returns `{ className?, background?, solid }`. Stored values are literal, never palette indices, so a highlight's look survives palette edits.
 - `src/sidecar/` — parse/serialize the sidecar `.md` format; round-trip-safe.
 - `src/resolver/` — the §6 selector cascade: exact → context → fuzzy → orphan.
-- `src/obsidian/` — `metadata.ts` (metadataCache → resolver `SourceStructure`) and `sidecar-path.ts` (now folder-aware: optional `sidecarFolder` re-roots sidecars, mirroring the source path). These use **`import type` only** from `obsidian`, so they stay testable.
+- `src/obsidian/` — `metadata.ts` (metadataCache → resolver `SourceStructure`) and `sidecar-path.ts` (folder-aware: optional `sidecarFolder` stores sidecars **directly** in that exact folder, named by the source's basename — the source's directory is *not* mirrored beneath it; the name-based inverse is therefore lossy for the folder case, so `resolveSourcePath` prefers the sidecar's `annotates` frontmatter). These use **`import type` only** from `obsidian`, so they stay testable.
 
 **Obsidian runtime — typechecked, NOT unit-tested (needs a live vault).**
 - `src/store/` — load + live re-resolve + atomic sidecar write-back + highlight creation. The runtime hub.
@@ -124,7 +124,26 @@ When adding a module, decide its zone first. If it can be pure, make it pure.
   (`setHighlights(view, specs)`); the ViewPlugin maps them through doc changes.
 - Sidecar writes go through `vault.process` (atomic read-modify-write); a new sidecar
   is `vault.create`d with `schema`/`annotates`/`source_hash` frontmatter. With a custom
-  `sidecarFolder`, the store `ensureParentFolder`s the mirrored path before create.
+  `sidecarFolder`, the store `ensureParentFolder`s the (exact) folder before create.
+- **Flat-folder name collisions (`sidecarFolder` set).** Two same-named notes in
+  different folders map to the same canonical sidecar name. The store's lookup
+  (`sidecarFileFor`) is ownership-aware: own canonical (`annotates` matches) → own
+  *numbered* sidecar (`Note-1.annotations.md`, found by `probeSuffixed` — probe
+  slots `-1, -2, …`, match `annotates`, stop at the first gap; safe because emptied
+  sidecars are never auto-deleted, so a cluster has no gaps) → shared canonical
+  fallback. On a colliding source's **first** write, `writeSidecar` calls the
+  injected `onCollision` resolver (wired in `main.ts` to `SidecarCollisionModal`):
+  **suffix** ("Keep separate" — claim the first free numbered slot, recommended),
+  **continue** ("Continue (share file)" — share the existing sidecar; both notes
+  read it best-effort, the off-note's may orphan), or **cancel** (`createHighlight`
+  returns `null`). The numbered slot is positional (first-free), *not* derived from
+  the source — re-location is always by probing `annotates`, never a stored number.
+  A session-sticky `resolvedSidecar` map binds the chosen path so repeat writes skip
+  the prompt and bridge the post-`create` metadataCache lag; it is *not* set from a
+  shared-fallback read, so a first write still prompts (a shared note may re-prompt
+  after a reload — acceptable; a "Keep separate" note is found by probe and never
+  re-prompts). Collisions only arise in folder mode; alongside, the canonical name
+  embeds the full source path and is always unique.
 
 ## Highlight-creation & color surfaces (added after the original design)
 
@@ -249,19 +268,26 @@ refusing.
 
 ## Status / next step
 
-Core is done and tested (185 unit tests). The runtime layers build and typecheck; the
+Core is done and tested (191 unit tests). The runtime layers build and typecheck; the
 selection toolbar, custom palette, custom save location, and aside card controls are in.
-**This session** fixed two cross-block reading-mode bugs (real web-clip data): (1) a quote
-spanning multiple block elements now **paints** in reading mode — the per-block
-post-processor projects the per-element slice of the range, not the whole quote (Design.md
-§7.2, `reading.ts`); (2) clicking such a card now **jumps** in reading mode — the jump was
-editor-only (`editor.scrollIntoView` on the hidden CM editor moved nothing in preview), now
-mode-aware via `view.currentMode.applyScroll(line)` (Design.md §8.1, `navigation.ts`). Note:
-these highlights were never orphaned — the resolver anchors them fine; both bugs were in the
-render/jump layers. Prior sessions: document-ordered aside cards + one-way scroll sync
-(`src/ui/scroll-sync.ts`, Design.md §7.3); sidecar format rework (`[/]:#` terminator,
-fault-isolated parsing, end-of-file id-bound `anno` blocks, short base36 ids). Open items:
-the strict-write tradeoff (above) and the marginalia card-alignment stretch goal via
-`coordsAtPos` (Design.md §7.3). **Not yet re-verified in a live vault this session** — the
-fixes are covered by unit tests + typecheck/build; the reading-mode behaviors are best
-confirmed by the wdio e2e against real Obsidian.
+**This session** reworked the `sidecarFolder` setting and added collision handling
+(Design.md §4.1): (1) a custom folder is now the **exact** destination — sidecars sit
+*directly* in it, named by the source's basename, instead of mirroring the source's
+directory beneath it (`sidecar-path.ts`); (2) because a flat folder lets two same-named
+notes collide on the canonical sidecar name, the store's lookup is now ownership-aware
+(`sidecarFileFor` → own canonical / own numbered `Note-1` via `probeSuffixed` / shared
+fallback) and a colliding source's **first** write prompts a modal
+(`src/ui/collision-modal.ts`, wired via `store.onCollision`) — **Keep separate** (claim
+the first free numbered slot), **Continue (share file)**, or **Cancel**; (3)
+`resolveSourcePath` now prefers the sidecar's `annotates` frontmatter over the
+(now-lossy) name-based inverse, and `maybeReload` matches any sidecar that annotates the
+active source. A session-sticky `resolvedSidecar` binding skips re-prompts and bridges
+the post-`create` metadataCache lag. Prior sessions: cross-block reading-mode paint+jump
+(Design.md §7.2/§8.1); document-ordered aside cards + scroll sync (§7.3); sidecar format
+rework (`[/]:#` terminator, end-of-file id-bound `anno` blocks, short base36 ids). Open
+items: the strict-write tradeoff (above); a **continue/share** note may re-prompt across
+sessions (share choice isn't persisted) and a passive same-named open shows a sibling's
+highlights best-effort (both accepted, see Design.md §4.1); the card-alignment stretch
+goal via `coordsAtPos` (§7.3). **Collision flow not yet live-verified this session** —
+covered by typecheck/build + the pure path tests; the modal + vault writes need a real
+vault (or wdio e2e) to confirm.

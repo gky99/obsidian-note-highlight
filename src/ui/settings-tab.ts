@@ -50,8 +50,8 @@ export class MarginaliaSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName('Sidecar folder')
       .setDesc(
-        'Vault folder to store annotation sidecars in, mirroring each note\'s path. ' +
-          'Leave empty to keep a sidecar next to its source note.',
+        'Exact vault folder to store annotation sidecars in (named by each note\'s ' +
+          'file name, not its path). Leave empty to keep a sidecar next to its source note.',
       )
       .addText((text) =>
         text

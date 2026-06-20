@@ -18,3 +18,5 @@ export type {
 
 export { MarginaliaSettingTab } from './settings-tab';
 export type { SettingsHost } from './settings-tab';
+
+export { SidecarCollisionModal } from './collision-modal';
