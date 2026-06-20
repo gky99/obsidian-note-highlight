@@ -13,7 +13,7 @@
  *
  * All re-resolution is live; nothing trusts a stored coordinate.
  */
-import { TFile, Notice, normalizePath, type App } from 'obsidian';
+import { TFile, Notice, normalizePath, type App, type CachedMetadata } from 'obsidian';
 
 import type { Sidecar, Annotation, AnnoRecord, SidecarFrontmatter } from '@/model/types';
 import { SCHEMA_VERSION } from '@/model/types';
@@ -44,6 +44,14 @@ function shortId(length = 6): string {
 export interface ResolvedAnnotation {
   annotation: Annotation;
   result: ResolveResult;
+}
+
+/** A highlight to create in a batch (Web Highlights import): a range + presentation. */
+export interface NewHighlight {
+  from: number;
+  to: number;
+  color?: string;
+  comment?: string;
 }
 
 interface SourceEntry {
@@ -313,12 +321,76 @@ export class AnnotationStore {
     }
 
     const cache = this.app.metadataCache.getFileCache(sourceFile) ?? {};
+    const record = this.buildRecord(sourceText, cache, this.freshId(sourceFile.path), from, to, quote, color);
+    const annotation: Annotation = { id: record.id, quote, record, comment: '' };
+
+    const written = await this.writeSidecar(sourceFile, sourceText, (s) => {
+      s.annotations.push(annotation);
+    });
+    if (!written) return null; // user cancelled at the collision prompt
+    await this.load(sourceFile);
+    return annotation;
+  }
+
+  /**
+   * Create several highlights in one atomic sidecar write — the primitive behind
+   * the Web Highlights importer. Each range is captured exactly like
+   * {@link createHighlight} (quote + context + pin + heading), but the whole batch
+   * is appended and re-resolved once instead of per highlight. Ranges that are
+   * empty, already highlighted, or overlap one accepted earlier in the batch are
+   * skipped, upholding "one passage, one highlight" (§4.4). Returns the created
+   * annotations (callers should de-overlap upstream too; this is the backstop).
+   */
+  async createHighlights(sourceFile: TFile, items: NewHighlight[]): Promise<Annotation[]> {
+    if (items.length === 0) return [];
+    const sourceText = await this.app.vault.cachedRead(sourceFile);
+    const cache = this.app.metadataCache.getFileCache(sourceFile) ?? {};
+
+    const taken = new Set(
+      this.entries.get(sourceFile.path)?.sidecar.annotations.map((a) => a.id) ?? [],
+    );
+    const accepted: { from: number; to: number }[] = [];
+    const created: Annotation[] = [];
+    for (const item of items) {
+      const from = Math.min(item.from, item.to);
+      const to = Math.max(item.from, item.to);
+      const quote = tidyQuote(sourceText.slice(from, to));
+      if (normalizeQuote(quote).length === 0) continue;
+      if (this.annotationAt(sourceFile.path, from, to)) continue;
+      if (accepted.some((r) => Math.max(from, r.from) < Math.min(to, r.to))) continue;
+
+      let id = shortId();
+      while (taken.has(id)) id = shortId();
+      taken.add(id);
+      accepted.push({ from, to });
+      const record = this.buildRecord(sourceText, cache, id, from, to, quote, item.color);
+      created.push({ id, quote, record, comment: item.comment ?? '' });
+    }
+    if (created.length === 0) return [];
+
+    const written = await this.writeSidecar(sourceFile, sourceText, (s) => {
+      s.annotations.push(...created);
+    });
+    if (!written) return []; // user cancelled at the collision prompt
+    await this.load(sourceFile);
+    return created;
+  }
+
+  /** Capture an annotation's durable record for a source range `[from, to)` (§5.4). */
+  private buildRecord(
+    sourceText: string,
+    cache: CachedMetadata,
+    id: string,
+    from: number,
+    to: number,
+    quote: string,
+    color?: string,
+  ): AnnoRecord {
     const n = this.settings.contextChars;
     const pinId = findEnclosingBlockId(cache, from);
     const headingPath = findEnclosingHeadingPath(cache, from);
-
-    const record: AnnoRecord = {
-      id: this.freshId(sourceFile.path),
+    return {
+      id,
       ...(pinId ? { pin: `^${pinId}` } : {}),
       ...(headingPath ? { heading: headingPath } : {}),
       before: contextBefore(sourceText, from, n),
@@ -328,14 +400,6 @@ export class AnnotationStore {
       color: color ?? this.settings.defaultColor,
       created: new Date().toISOString(),
     };
-    const annotation: Annotation = { id: record.id, quote, record, comment: '' };
-
-    const written = await this.writeSidecar(sourceFile, sourceText, (s) => {
-      s.annotations.push(annotation);
-    });
-    if (!written) return null; // user cancelled at the collision prompt
-    await this.load(sourceFile);
-    return annotation;
   }
 
   async updateComment(sourcePath: string, id: string, comment: string): Promise<void> {
@@ -359,11 +423,19 @@ export class AnnotationStore {
   // --- writes ------------------------------------------------------------
 
   private newFrontmatter(sourcePath: string, sourceText: string): SidecarFrontmatter {
-    return {
+    const fm: SidecarFrontmatter = {
       schema: SCHEMA_VERSION,
       annotates: sourcePath,
       source_hash: contentHash(sourceText),
     };
+    // User-configured fields, added to every annotation file as it's created
+    // (both manual highlighting and import). Reserved keys can't be overridden.
+    const reserved = new Set(['schema', 'annotates', 'source_hash']);
+    for (const { key, value } of this.settings.sidecarFrontmatter ?? []) {
+      const k = key.trim();
+      if (k && !reserved.has(k)) fm[k] = value;
+    }
+    return fm;
   }
 
   /** Atomic read-modify-write of an existing sidecar (§9). */

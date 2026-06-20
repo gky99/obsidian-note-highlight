@@ -3,7 +3,7 @@
  * right-sidebar aside panel and the settings tab. The plugin (`main.ts`) wires
  * these to the workspace and the {@link AnnotationStore}.
  */
-export { ASIDE_VIEW_TYPE, MarginaliaAsideView } from './aside-view';
+export { ASIDE_VIEW_TYPE, MarginaliaAsideView, DELETE_PROMPT } from './aside-view';
 export type { AsideDeps } from './aside-view';
 
 export { ScrollSync } from './scroll-sync';
@@ -20,3 +20,5 @@ export { MarginaliaSettingTab } from './settings-tab';
 export type { SettingsHost } from './settings-tab';
 
 export { SidecarCollisionModal } from './collision-modal';
+export { confirm } from './confirm';
+export { FolderSuggest, ColorSuggest } from './suggest';

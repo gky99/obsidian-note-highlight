@@ -14,6 +14,12 @@
 export const BUILTIN_COLORS = ['yellow', 'green', 'blue', 'pink', 'orange'] as const;
 export type BuiltinColor = (typeof BUILTIN_COLORS)[number];
 
+/** A frontmatter key/value pair written into every newly created annotation file. */
+export interface SidecarField {
+  key: string;
+  value: string;
+}
+
 export interface MarginaliaSettings {
   /** Inserted before the `.md` extension to name a source's sidecar, e.g. `.annotations`. */
   sidecarSuffix: string;
@@ -34,6 +40,14 @@ export interface MarginaliaSettings {
   revealAnnoOnCursor: boolean;
   /** Open the aside panel automatically when a note with annotations is opened. */
   autoOpenAside: boolean;
+  /** Vault folder holding Web Highlights JSON export(s); the newest by name is imported. */
+  webHighlightsFolder: string;
+  /** Folder to scan for clips when importing into all clips (empty = whole vault). */
+  clipsFolder: string;
+  /** Key/value pairs written into the frontmatter of every newly created annotation file. */
+  sidecarFrontmatter: SidecarField[];
+  /** Ask for confirmation before deleting an annotation (aside + toolbar). */
+  confirmDelete: boolean;
 }
 
 export const DEFAULT_SETTINGS: MarginaliaSettings = {
@@ -45,4 +59,8 @@ export const DEFAULT_SETTINGS: MarginaliaSettings = {
   contextChars: 30,
   revealAnnoOnCursor: true,
   autoOpenAside: false,
+  webHighlightsFolder: '',
+  clipsFolder: '',
+  sidecarFrontmatter: [],
+  confirmDelete: true,
 };

@@ -589,3 +589,94 @@ Both are unit-covered (`reading.test.ts` "spans two block elements"; the resolve
 the existing pipeline tests). Offset-accurate reading-mode highlighting remains a non-goal
 (§7.2) — these fixes keep reading mode a faithful *best-effort* mirror of the CM6 path.
 
+## 15. Web Highlights import + settings surfaces (added 2026-06-20)
+
+Marginalia absorbed the *import* half of a standalone "Highlight Exporter" plugin: it reads a
+**Web Highlights** browser-extension JSON export and re-creates those highlights as sidecar
+annotations on the matching clip (a note whose frontmatter carries the page's source URL).
+Deliberately scoped — only the import crossed over (`src/import/`).
+
+### 15.1 The sidecar replaces both the reading note and the in-clip mark
+
+The source plugin produced two outputs: a generated *reading note* and `==marks==` written
+back into the clip. Marginalia keeps neither. A highlight's durable home is its sidecar
+(§4.1), which already carries quote + comment + color — so it *is* the reading note, and the
+clip stays byte-for-byte untouched (the non-destructive premise, §4.1). An import therefore
+never edits source files, and re-running one never accumulates a second copy.
+
+### 15.2 Import has its own locator — more aggressive than the reading-mode one (lesson learned)
+
+A mark stores the *rendered* text the browser showed; the clip is reflowed, re-wrapped, and
+re-marked-up Markdown. Matching mark→source is the same *shape* as the reading-mode toolbar's
+"selected text → source range" problem (`@/text/locate#findSourceRange`), and the first
+instinct was to reuse it. **It under-matched: 14/17 on a real export vs the source plugin's
+17/17.** The reading-mode locator is deliberately conservative (collapses whitespace only,
+case- and punctuation-sensitive) *because it mirrors exactly what the reading painter shows*.
+Import has no such constraint — it only needs to *find the passage* — so it gets its own
+locator (`src/import/locate.ts#locateMark`): links reduced to their text, emphasis/structure
+markers stripped, smart punctuation folded to ASCII, lowercased, **all** whitespace removed.
+The three misses were exactly those gaps — a stray space a clipper inserted around a mangled
+`*italic*`, a curly apostrophe, a word turned into a `[link](url)`. Crucially the projection
+keeps a per-character map back to true source offsets, so an aggressive *match* still yields an
+*exact* `[from,to)` the store can highlight and the resolver re-anchor. **General principle:**
+two callers that look like they share a text-matching need can have different tolerances; a
+locator's strictness should follow its *consumer's* needs (what it must render) not a shared
+helper's convenience. The reading-mode locator stayed untouched.
+
+Both locators are best-effort and first-occurrence; an unlocatable mark is reported as "not
+located", never guessed (§4.6).
+
+### 15.3 Idempotency is the one-passage-one-highlight rule, reused
+
+The plan de-overlaps located marks against the source's existing anchored ranges *and* against
+each other (`src/import/plan.ts`) — the §14.2 stacking rule applied in bulk. A free
+consequence: re-importing the same export finds each mark's range now overlapping the highlight
+it created last time, so it's skipped. The import is **idempotent with no "already imported"
+bookkeeping** — overlap *is* the dedupe key.
+
+### 15.4 One batched sidecar write, preview-first
+
+`store.createHighlights` appends a whole plan in one read-modify-write + a single reload (vs
+`createHighlight`'s per-highlight write), sharing the quote/context/pin/heading capture
+(`buildRecord`) so an imported annotation is indistinguishable from a hand-made one. The flow
+is **preview-first**: a command computes the plan *without writing*, opens a preview, and
+writes only on confirm (`Import N highlights`, the focused default — Enter confirms; there is
+no write-immediately command). The preview (`preview-modal.ts`) has two layouts:
+
+- **single clip** — a meta bar (target sidecar + counts), the clip's frontmatter as a
+  read-only Properties table, then **one card per highlight: the colored quote and its rendered
+  comment**. Deliberately *not* a note outline — the source plugin previewed a reconstructed
+  reading note (headings + body), but a Marginalia sidecar stores only quotes + comments, so
+  the preview mirrors exactly that (the §15.1 "the sidecar *is* the note" rule, applied to the
+  preview surface).
+- **all clips** — a dry-run report: stat cards (highlights / notes / nothing-new) and a
+  per-clip entry list (file icon, title, count chips).
+
+**Lesson — the preview is a faithful mock of the result, so it must mirror the *output model*,
+not the source tool's.** Porting the exporter's note-render preview verbatim would have shown
+a heading skeleton Marginalia never produces; the preview's job is to answer "what will exist
+after I confirm?", which here is a flat set of highlighted quotes + comments.
+
+### 15.5 Settings & shared UI, ported to Marginalia's vocabulary — but only what applies
+
+The exporter's settings UX came across as `mrg-*` classes on Obsidian theme variables, minus
+the reading-note machinery (frontmatter-for-a-note tables, color-mark rules, note-render
+preview) which has no analogue here. What landed:
+
+- **Folder autocomplete** (`AbstractInputSuggest<TFolder>`) on every folder field — including
+  the pre-existing `sidecarFolder`, the same hand-typed-path hazard.
+- **Palette as a swatch table** (§12): each row a token/`#hex` input with a live swatch
+  (hatched = unset/unrecognized), **drag-reorderable** so the table order *is* the
+  toolbar/popup order, autocompleting the built-in tokens *plus the colors found in the newest
+  export* — so you build the palette from the colors you actually highlight with. The palette
+  data model is unchanged (colors are literal, §5.4); only its *order* now carries meaning.
+- **Annotation-file frontmatter** — configurable key/value pairs written into *every new
+  sidecar's* frontmatter as it is created (manual highlight or import); `schema` / `annotates`
+  / `source_hash` are reserved (§5.3).
+- **Confirm-before-delete** — a default-on, opt-out gate on both delete paths (aside card +
+  toolbar) via a generic confirm modal. The import preview defaults to its *confirm* button;
+  the delete dialog deliberately does **not** (Enter must not destroy a highlight + comment).
+
+Import only adds a new *producer* of annotations; it introduces no new rendering path, and
+offset-accurate reading-mode rendering stays a non-goal (§7.2).
+

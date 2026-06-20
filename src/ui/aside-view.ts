@@ -23,6 +23,7 @@ import {
 import type { AnnotationStore, ResolvedAnnotation } from '@/store/store';
 import type { MarginaliaSettings } from '@/settings';
 import { renderColor, colorLabel, normalizeColorValue } from '@/color';
+import { confirm } from './confirm';
 
 /** Stable view type for `registerView` / `getViewType`. */
 export const ASIDE_VIEW_TYPE = 'marginalia-aside';
@@ -410,10 +411,26 @@ export class MarginaliaAsideView extends ItemView {
     setIcon(button, 'trash-2');
     button.addEventListener('click', (e) => {
       e.stopPropagation(); // don't trigger the card's jump handler
-      void this.deps.store.deleteAnnotation(sourcePath, id);
+      void this.confirmThenDelete(sourcePath, id);
     });
   }
+
+  /** Delete an annotation, asking first when the `confirmDelete` setting is on. */
+  private async confirmThenDelete(sourcePath: string, id: string): Promise<void> {
+    if (this.deps.settings.confirmDelete && !(await confirm(this.deps.app, DELETE_PROMPT))) {
+      return;
+    }
+    await this.deps.store.deleteAnnotation(sourcePath, id);
+  }
 }
+
+/** Shared copy for the "really delete?" dialog (aside + toolbar). */
+export const DELETE_PROMPT = {
+  title: 'Delete annotation',
+  message: 'Delete this highlight and its comment? This cannot be undone.',
+  confirmText: 'Delete',
+  warning: true,
+};
 
 // --- pure helpers (no obsidian runtime) -----------------------------------
 

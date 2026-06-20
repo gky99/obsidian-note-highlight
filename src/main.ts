@@ -35,6 +35,7 @@ import {
 import { renderAnnoBlock, makeReadingHighlighter, ANNO_LANGUAGE } from '@/reading';
 import { findSourceRange } from '@/text/locate';
 import { normalizeColorValue } from '@/color';
+import { WebHighlightsImporter } from '@/import';
 import {
   ASIDE_VIEW_TYPE,
   MarginaliaAsideView,
@@ -42,6 +43,8 @@ import {
   SelectionToolbar,
   ScrollSync,
   SidecarCollisionModal,
+  confirm,
+  DELETE_PROMPT,
   type SettingsHost,
   type HighlightRequest,
   type ExistingHighlight,
@@ -52,6 +55,7 @@ const MARKDOWN_VIEW_TYPE = 'markdown';
 export default class MarginaliaPlugin extends Plugin implements SettingsHost {
   settings: MarginaliaSettings = { ...DEFAULT_SETTINGS };
   store!: AnnotationStore;
+  private importer!: WebHighlightsImporter;
   /** Last painted highlight signature per source, to re-render reading mode only when it changes. */
   private readingSig = new Map<string, string>();
   /**
@@ -67,6 +71,7 @@ export default class MarginaliaPlugin extends Plugin implements SettingsHost {
     this.store = new AnnotationStore(this.app, this.settings);
     // Prompt on a flat-folder sidecar name collision (Design.md §4.1).
     this.store.onCollision = (collision) => new SidecarCollisionModal(this.app, collision).choose();
+    this.importer = new WebHighlightsImporter(this.app, this.store, this.settings);
 
     // --- CM6 editor extension: highlights + anno hiding + reverse nav -----
     this.registerEditorExtension(
@@ -90,7 +95,7 @@ export default class MarginaliaPlugin extends Plugin implements SettingsHost {
         this.existingHighlight(view, (sourcePath) => this.store.annotationAt(sourcePath, from, to)),
       onRecolor: (t, color) => void this.store.updateColor(t.sourcePath, t.id, color),
       onComment: (t, comment) => void this.store.updateComment(t.sourcePath, t.id, comment),
-      onDelete: (t) => void this.store.deleteAnnotation(t.sourcePath, t.id),
+      onDelete: (t) => void this.confirmThenDelete(t.sourcePath, t.id),
     });
     toolbar.start();
     this.register(() => toolbar.destroy());
@@ -140,8 +145,18 @@ export default class MarginaliaPlugin extends Plugin implements SettingsHost {
       name: 'Open annotations panel',
       callback: () => void this.activateAside(true),
     });
-    this.addRibbonIcon('highlighter', 'Marginalia: annotations', () =>
-      void this.activateAside(true),
+    this.addCommand({
+      id: 'import-web-highlights-current',
+      name: 'Import Web Highlights into current note',
+      callback: () => void this.importer.importCurrent(),
+    });
+    this.addCommand({
+      id: 'import-web-highlights-all',
+      name: 'Import Web Highlights into all clips',
+      callback: () => void this.importer.importAll(),
+    });
+    this.addRibbonIcon('highlighter', 'Marginalia: import highlights into current note', () =>
+      void this.importer.importCurrent(),
     );
 
     // --- Reactivity -------------------------------------------------------
@@ -183,6 +198,19 @@ export default class MarginaliaPlugin extends Plugin implements SettingsHost {
       Array.isArray(this.settings.palette) && this.settings.palette.length > 0
         ? [...this.settings.palette]
         : [...DEFAULT_SETTINGS.palette];
+    // Own a fresh, coerced copy of the frontmatter field list so edits never alias
+    // DEFAULT_SETTINGS and a malformed persisted value can't crash the settings tab.
+    this.settings.sidecarFrontmatter = Array.isArray(this.settings.sidecarFrontmatter)
+      ? this.settings.sidecarFrontmatter.map((f) => ({
+          key: String(f?.key ?? ''),
+          value: String(f?.value ?? ''),
+        }))
+      : [];
+  }
+
+  /** Distinct colors in the newest Web Highlights export (for palette autocomplete). */
+  exportColors(): Promise<string[]> {
+    return this.importer.exportColors();
   }
 
   async saveSettings(): Promise<void> {
@@ -399,6 +427,12 @@ export default class MarginaliaPlugin extends Plugin implements SettingsHost {
     const aside = this.getAside();
     aside?.setSourceFile(file.path);
     aside?.revealCard(anno.id);
+  }
+
+  /** Delete an annotation, asking first when the `confirmDelete` setting is on. */
+  private async confirmThenDelete(sourcePath: string, id: string): Promise<void> {
+    if (this.settings.confirmDelete && !(await confirm(this.app, DELETE_PROMPT))) return;
+    await this.store.deleteAnnotation(sourcePath, id);
   }
 
   private async activateAside(reveal: boolean): Promise<void> {

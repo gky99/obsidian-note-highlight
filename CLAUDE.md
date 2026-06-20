@@ -59,6 +59,12 @@ When adding a module, decide its zone first. If it can be pure, make it pure.
   harmless Vite warning. `main.js` / `main.js.map` are gitignored (build artifacts).
 - Production uses an external sourcemap (`sourcemap: true`) so `main.js` stays lean
   (~210 KB). Don't switch to inline unless debugging — it 4×'s the file.
+- **Testing a worktree build in the live vault ("compile to root").** Obsidian loads the
+  plugin from the repo root (the *master* worktree dir), but a feature worktree builds
+  `main.js` into *its own* root. To run a branch in-vault, copy `main.js` + `main.js.map`
+  (gitignored) **and** `styles.css` (tracked!) up to the plugin root. Because `styles.css` is
+  tracked and loaded in place, deploying it there shows the master worktree as `M styles.css`
+  — expected (it's the running build of the branch); it reconciles when the branch merges.
 
 ## Testing conventions
 
@@ -207,6 +213,85 @@ When adding a module, decide its zone first. If it can be pure, make it pure.
     `render()`) closed the color popup the instant it opened. A real file switch still
     renders.
 
+## Web Highlights import (`src/import/`, added 2026-06-20)
+
+Imports highlights made with the **Web Highlights** browser extension (a JSON
+export) as Marginalia sidecar annotations. Migrated from the standalone
+"Highlight Exporter" plugin — **only the import** came over: there is no reading-note
+generation and the clip is never modified (the sidecar replaces both). A *clip* is
+any note whose frontmatter carries the page's source URL (`source`/`url`/…).
+
+- **Pure core** (Obsidian-free, unit-tested):
+  - `web-highlights.ts` — the export format: `parseExport`, `marksForUrl`/`urlsWithMarks`
+    (URL match, hash/trailing-slash-insensitive), `urlFromMeta` (bare or `[t](url)`),
+    `markColor` (the mark's hex, stored **literally** — Marginalia renders arbitrary
+    `#hex`, so WH colors survive verbatim), `markComment`/`htmlToMarkdown` (the HTML
+    note → Markdown; deliberately never emits blockquotes/code blocks a sidecar comment
+    can't hold, §5.1).
+  - `locate.ts` — `locateMark(source, text)`: the import's own locator. A mark's text is
+    plain rendered text; the clip is reflowed/re-marked-up Markdown, so it matches on an
+    **aggressive** projection (links→text, markers stripped, smart-punct folded to ASCII,
+    lowercased, **all whitespace removed**) while keeping a 1:1 char→offset map back to the
+    source, so a hit yields an exact `[from, to)`. This mirrors Highlight Exporter's
+    normalization (verified: 17/17 on its real sample, vs 14/17 for the toolbar's
+    conservative `@/text/locate#findSourceRange`, which stays unchanged for reading mode).
+    Both are best-effort + first-occurrence; a miss is reported, never guessed (§4.6).
+  - `plan.ts` — `planImport(sourceText, marks, existingRanges, opts)`: locate → de-overlap
+    against existing annotations *and* intra-batch (upholding one-passage-one-highlight,
+    which makes **re-runs idempotent**) → `{ planned, unmatched, skipped }`, sorted by
+    source position.
+- **Runtime**:
+  - `store.createHighlights(file, items[])` — batches the whole import into **one** sidecar
+    write + a single reload (vs N for `createHighlight`); shares the record-capture
+    (`buildRecord`) with the single-create path; backstops the overlap guard.
+  - `importer.ts` (`WebHighlightsImporter`) — finds the newest `.json` in
+    `settings.webHighlightsFolder` (newest **by name** — exports are timestamped) and
+    resolves each clip's URL from the metadata cache. **Preview-first**: it `planClip`s
+    every candidate *without writing*, opens `preview-modal.ts` (`ImportPreviewModal`), and
+    only **on confirm** calls `store.createHighlights` (no write-immediately command). The
+    modal has two layouts: **single clip** = meta bar + the clip's frontmatter as a Properties
+    table + one card per highlight (colored quote + rendered comment — flat, *no* heading
+    outline, since the sidecar stores only quotes+comments); **all clips** = stat cards +
+    per-clip entry list (icon, title, count chips). Confirm is the focused default.
+  - Settings: `webHighlightsFolder` + `clipsFolder`; commands **Import Web Highlights into
+    current note** / **into all clips** (`main.ts`) — both open the preview.
+- **Not automatically verified in-vault** (runtime layers aren't unit-tested here, per
+  convention) — the matching/offset core is, against the real export sample.
+
+## Settings & shared UI (ported from Highlight Exporter, 2026-06-20)
+
+UI design pulled across from the standalone plugin, adapted to Marginalia's `mrg-`
+vocabulary (all on Obsidian CSS variables, theme-aware). Reading-note-specific surfaces
+(reading-note frontmatter, color-marks, output folder, note-render preview) were **not**
+ported — they don't apply. What landed:
+
+- **`src/ui/suggest.ts`** — `FolderSuggest` / `ColorSuggest` (Obsidian `AbstractInputSuggest`).
+  Folder autocomplete now backs **all three** folder fields (`sidecarFolder`,
+  `webHighlightsFolder`, `clipsFolder`); color autocomplete offers the built-in tokens.
+- **Palette as a swatch table** (`settings-tab.ts#renderPalette`) — replaced the
+  per-color `Setting` rows with a flex table: each row a drag handle + live swatch
+  (`.mrg-color-swatch.is-empty` = hatched "unset/unrecognized", via `isUsableColor`) +
+  token/`#hex` text input + delete, plus "Add". (Palette data model is unchanged — still
+  `settings.palette: string[]`; the *order* is the toolbar/card-popup order.)
+  - **Reorderable** via HTML5 drag-and-drop on the grip handle (`makeReorderable`); the drop
+    moves the entry to land just before the drop row (the `from < to ? to-1 : to` adjustment
+    keeps it consistent in both directions). Reordering rewrites `settings.palette`, so the
+    toolbar/popup order updates on save.
+  - **Autocomplete** offers the built-in tokens **plus the colors in the newest export**
+    (`ColorSuggest` over `colorsInExport` → `importer.exportColors()` → `SettingsHost.exportColors()`),
+    each with a swatch — so you build the palette from the colors you actually highlight with.
+    Loaded async on `display()` into `exportColorOptions` (the suggester reads it lazily).
+- **Annotation-file frontmatter** — `settings.sidecarFrontmatter: {key,value}[]`, edited via
+  a Key/Value grid table (`renderFrontmatterSection`), written into **every new sidecar's**
+  frontmatter by `store.newFrontmatter` (so both manual highlighting *and* import get them);
+  reserved keys `schema`/`annotates`/`source_hash` can't be overridden.
+- **Delete confirmation** — `settings.confirmDelete` (default **on**) gates *both* delete
+  paths (aside trash, toolbar) through `src/ui/confirm.ts` (`confirm()` → `Promise<boolean>`,
+  Esc/click-outside = no). Shared copy in `DELETE_PROMPT`; `confirmThenDelete` lives in both
+  `aside-view.ts` and `main.ts`.
+- **Import preview** — the rich two-layout modal (single: meta + Properties table + per-quote
+  cards; all: stat cards + entry list) — see the import section above and Design.md §15.4.
+
 ## Known issues / unresolved
 
 ### Reading-mode highlights — RESOLVED (2026-06-20)
@@ -268,26 +353,32 @@ refusing.
 
 ## Status / next step
 
-Core is done and tested (191 unit tests). The runtime layers build and typecheck; the
-selection toolbar, custom palette, custom save location, and aside card controls are in.
-**This session** reworked the `sidecarFolder` setting and added collision handling
-(Design.md §4.1): (1) a custom folder is now the **exact** destination — sidecars sit
-*directly* in it, named by the source's basename, instead of mirroring the source's
-directory beneath it (`sidecar-path.ts`); (2) because a flat folder lets two same-named
-notes collide on the canonical sidecar name, the store's lookup is now ownership-aware
-(`sidecarFileFor` → own canonical / own numbered `Note-1` via `probeSuffixed` / shared
-fallback) and a colliding source's **first** write prompts a modal
-(`src/ui/collision-modal.ts`, wired via `store.onCollision`) — **Keep separate** (claim
-the first free numbered slot), **Continue (share file)**, or **Cancel**; (3)
-`resolveSourcePath` now prefers the sidecar's `annotates` frontmatter over the
-(now-lossy) name-based inverse, and `maybeReload` matches any sidecar that annotates the
-active source. A session-sticky `resolvedSidecar` binding skips re-prompts and bridges
-the post-`create` metadataCache lag. Prior sessions: cross-block reading-mode paint+jump
-(Design.md §7.2/§8.1); document-ordered aside cards + scroll sync (§7.3); sidecar format
-rework (`[/]:#` terminator, end-of-file id-bound `anno` blocks, short base36 ids). Open
-items: the strict-write tradeoff (above); a **continue/share** note may re-prompt across
-sessions (share choice isn't persisted) and a passive same-named open shows a sibling's
-highlights best-effort (both accepted, see Design.md §4.1); the card-alignment stretch
-goal via `coordsAtPos` (§7.3). **Collision flow not yet live-verified this session** —
-covered by typecheck/build + the pure path tests; the modal + vault writes need a real
-vault (or wdio e2e) to confirm.
+Core is done and tested. The runtime layers build and typecheck; the selection toolbar,
+custom palette, custom save location, and aside card controls are in. Recent work, newest
+first:
+
+- **Web Highlights import** (`src/import/`, see its section): export → sidecar annotations,
+  preview-first, non-destructive, idempotent; matching/offset core verified 17/17 against the
+  real sample (its in-vault runtime path is not auto-tested, per convention). Plus the
+  settings/UI ported from the exporter (see "Settings & shared UI") — folder autocomplete,
+  the palette swatch table (drag-reorder + export-color autocomplete), annotation-file
+  frontmatter fields, and a confirm-before-delete toggle.
+- **`sidecarFolder` = exact folder + collision handling** (Design.md §4.1): a custom folder is
+  now the *exact* destination (sidecars sit directly in it, named by the source basename), so
+  the store's lookup is ownership-aware (own canonical / own numbered `Note-1` via
+  `probeSuffixed` / shared fallback) and a colliding source's first write prompts
+  `src/ui/collision-modal.ts` (via `store.onCollision`) — Keep separate / Continue (share) /
+  Cancel. `resolveSourcePath` prefers the sidecar's `annotates` over the now-lossy name-based
+  inverse; a session-sticky `resolvedSidecar` binding skips re-prompts. **`writeSidecar` now
+  returns a boolean** (false = collision cancel); `createHighlight`/`createHighlights` honor it.
+- Two cross-block reading-mode fixes: a quote spanning multiple block elements now **paints**
+  in reading mode (per-block projection of the per-element slice, `reading.ts`, §7.2), and
+  clicking its card **jumps** in reading mode (mode-aware `view.currentMode.applyScroll(line)`,
+  `navigation.ts`, §8.1). These were render/jump-layer bugs; the resolver anchored them fine.
+- Document-ordered aside cards + one-way scroll sync (`src/ui/scroll-sync.ts`, §7.3).
+- Sidecar format rework (`[/]:#` terminator, fault-isolated parsing, end-of-file id-bound
+  `anno` blocks, short base36 ids).
+
+Open items: the strict-write tradeoff (above); a continue/share collision choice may re-prompt
+across sessions (not persisted); in-vault verification of the import and the collision flow;
+the card-alignment stretch goal via `coordsAtPos` (§7.3).
