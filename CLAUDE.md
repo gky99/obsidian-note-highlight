@@ -115,8 +115,13 @@ When adding a module, decide its zone first. If it can be pure, make it pure.
     the selected text, re-located in source via `@/text/locate` (`findSourceRange`),
     best-effort, with a Notice on failure. Wired in `main.ts` (`highlightRequest`).
   - **edit** — clicking a painted `.mrg-highlight` (DOM `data-anno-id`, both modes), or
-    selecting over one, → the same swatches (current color marked) **plus a delete
-    button** → `onRecolor`/`onDelete` (`store.updateColor`/`deleteAnnotation`). A
+    selecting over one, → the same swatches (current color marked) **plus a comment
+    button and a delete button** → `onRecolor`/`onComment`/`onDelete`
+    (`store.updateColor`/`updateComment`/`deleteAnnotation`). The comment button swaps the
+    swatch row for an inline textarea right at the highlight (pre-filled; commits the
+    *changed* text on blur / Escape / Cmd-Enter — no live per-keystroke write, so a store
+    re-resolve never repaints the anchored highlight DOM out from under the editor mid-edit;
+    a dismiss-by-`hide()` still flushes the pending commit). A
     click-opened edit is *sticky* (survives the selection collapsing; dismissed by an
     outside click / Escape); a selection-over-highlight edit clears with the selection.
     The plugin resolves the edit target via `existingHighlight` → `store.getById` (click)
@@ -131,6 +136,14 @@ When adding a module, decide its zone first. If it can be pure, make it pure.
 - **Aside card UI**: clicking a card jumps (no Jump button); the color control is one
   swatch button that opens a popup of palette swatches; each card has a trash/delete
   button (`store.deleteAnnotation`). Comment textarea is full-width.
+  - **A re-render must not destroy transient foreground UI** (Design.md §14.5). The
+    panel rebuilds on `render()`, which tears down the open color popup / focused comment
+    editor. `refresh()` and `setSourceFile` therefore skip re-rendering while `isBusy()`
+    (`isEditing() || colorPopup != null`), and `setSourceFile` skips a *same-file* render
+    entirely. Without this, the `active-leaf-change` that fires when you click from the
+    editor into the panel (→ `syncActiveFile` → `setSourceFile`+`store.load`, both of which
+    `render()`) closed the color popup the instant it opened. A real file switch still
+    renders.
 
 ## Known issues / unresolved
 

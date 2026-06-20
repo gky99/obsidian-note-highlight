@@ -284,6 +284,49 @@
   height: 15px;
 }
 
+/* Comment button in the toolbar's edit mode: an icon that opens the inline editor. */
+.mrg-toolbar-comment {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 18px;
+  padding: 0;
+  margin-left: 2px;
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  border-left: 1px solid var(--background-modifier-border);
+  border-radius: 0;
+  box-shadow: none;
+  cursor: pointer;
+}
+
+.mrg-toolbar-comment:hover {
+  color: var(--text-normal);
+}
+
+.mrg-toolbar-comment .svg-icon {
+  width: 15px;
+  height: 15px;
+}
+
+/* Comment-editing layout: the toolbar becomes a roomy box for the textarea. */
+.mrg-selection-toolbar.mrg-toolbar-commenting {
+  display: block;
+  width: 280px;
+  max-width: calc(100vw - 16px);
+  padding: 6px;
+}
+
+.mrg-toolbar-comment-input {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  font-family: inherit;
+  font-size: var(--font-ui-small);
+}
+
 /* --- Settings palette swatch -------------------------------------------- */
 
 .mrg-settings-swatch {

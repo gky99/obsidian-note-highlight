@@ -380,7 +380,8 @@ as a discriminated `ToolbarState`:
 
 - **create** — a fresh selection over un-highlighted text → palette swatches → highlight.
 - **edit** — clicking a painted `.mrg-highlight` (read by `data-anno-id`), or selecting
-  over one, → the same swatches with the current color marked **plus a delete button**.
+  over one, → the same swatches with the current color marked **plus a comment button and
+  a delete button**.
 
 Why one surface, not a separate edit popup: the same control must serve source/Live
 Preview **and** reading mode, and reading mode has no CodeMirror (§7.2). The DOM
@@ -390,7 +391,7 @@ edit. A click opens a **sticky** edit (survives the selection collapsing; dismis
 an outside click / Escape); a selection-over-highlight edit is non-sticky and clears
 with the selection, exactly like create. The plugin resolves the clicked id / overlapping
 range into an edit target via the store (`getById` / `annotationAt`) and applies recolor
-/ delete through the existing write-back path (§9) — no new persistence surface.
+/ comment / delete through the existing write-back path (§9) — no new persistence surface.
 
 ### 14.2 One passage, one highlight (no stacking)
 
@@ -429,4 +430,61 @@ on a real Reading↔Editing transition makes it fire **exactly once** per switch
 **General principle:** treat *render mode* as a first-class input to repaint, alongside
 *which file is active* and *what the annotations are*. A correct highlight set is necessary
 but not sufficient — it must be re-pushed whenever the surface that displays it is rebuilt.
+
+### 14.4 Comment in one click from the highlight (inline editor)
+
+**Motivation:** with recolor/delete reachable in one click from a clicked highlight but
+*commenting* only via the aside card, adding a comment meant click-highlight (reveal the
+card) → find the card → click its comment field. The toolbar's comment button collapses
+that to one click: it swaps the swatch row for an inline `<textarea>` positioned at the
+highlight, pre-filled with the current comment.
+
+Two non-obvious decisions:
+
+- **Commit on blur, not per keystroke.** The aside's comment editor live-writes
+  (debounced) because it can guard re-renders with `isEditing()`. The toolbar has no such
+  guard, and every `store.updateComment` re-resolves and emits `onChange` → `repaint`.
+  A live write would therefore risk repainting the very `.mrg-highlight` whose rect the
+  toolbar is anchored to (and in reading mode, re-rendering the section), tearing the
+  editor down mid-type. So the inline editor only writes the *changed* text once, on
+  commit (blur / Escape / Cmd-Enter). (Comment edits don't change the highlight *set*, so
+  the eventual commit's repaint is a no-op for reading mode and an identical-set re-push
+  for CM — §14.3's signature guard.)
+- **A dismiss-by-hide still saves.** The commit closure is also parked on the controller
+  (`commitComment`); `hide()` and the next `build()` flush it, so closing the toolbar by
+  an outside click / Escape / a jump to another highlight — paths where the textarea's own
+  `blur` may not fire before the element is removed — never drops an in-progress comment.
+
+### 14.5 A background re-render must not destroy a foreground popup (lesson learned)
+
+**Symptom observed this session:** with the editor focused, clicking a card's color
+button in the aside opened the swatch popup, which then *immediately closed itself*. It
+only reproduced when the **editor** held focus first.
+
+**Root cause:** clicking from the editor into the panel changes Obsidian's active leaf →
+`active-leaf-change` → `syncActiveFile()` → `aside.setSourceFile(samePath)` +
+`store.load()`. `store.load` emits `onChange` **unconditionally**, and *both*
+`setSourceFile` and the `onChange → refresh()` it triggers call the aside's `render()` —
+which begins by tearing down transient UI (`closeColorPopup()`, `root.empty()`). So a
+re-render provoked by merely *focusing* the panel destroyed the popup the instant it
+opened. The "editor focused first" condition is the tell: only then does clicking the
+panel flip the active leaf and fire the redundant re-sync.
+
+**Fix:** the panel already shielded an in-progress *comment edit* from store-driven
+re-renders (the `isEditing()` guard in `refresh()`, §14.3 / the aside's "don't yank the
+textarea" rule). Generalize it: `isBusy()` = `isEditing() || colorPopup != null`; guard
+`refresh()` on `isBusy()`; and have `setSourceFile` skip the render on a **redundant
+same-file** sync while busy (`if (!sameFile || !isBusy()) render()`). A real file switch
+still renders. Transient foreground UI now survives a redundant background re-render and
+is reconciled when the interaction ends — picking a swatch calls `closeColorPopup()` first,
+then its `updateColor` write re-renders the card fresh.
+
+**General principle:** a full list re-render is *destructive* to any transient, user-owned
+UI mounted over it (an open popup, a focused inline editor). Treat "is the user
+mid-interaction?" as a first-class input to **whether to re-render at all**, and make
+redundant syncs (same file, no data change) no-ops rather than rebuilds. A complementary
+upstream guard is possible — `syncActiveFile()` could skip the reload entirely when the
+source path is unchanged, sparing the re-resolve on every `active-leaf-change` — but the
+panel-side `isBusy()` guard is the load-bearing fix, since `onChange` can also fire from a
+genuine background edit while a popup is open.
 

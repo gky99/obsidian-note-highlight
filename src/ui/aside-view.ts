@@ -87,6 +87,7 @@ export class MarginaliaAsideView extends ItemView {
 
   /** Point the panel at a source file (path) and re-render its cards; null clears. */
   async setSourceFile(path: string | null): Promise<void> {
+    const sameFile = path === this.sourcePath;
     this.sourcePath = path;
     if (path) {
       const file = this.deps.app.vault.getAbstractFileByPath(path);
@@ -99,17 +100,28 @@ export class MarginaliaAsideView extends ItemView {
         }
       }
     }
-    this.render();
+    // Re-render on a real file switch. On a *redundant* same-file sync — e.g. the
+    // active-leaf-change that fires when you click from the editor into the panel,
+    // which routes through syncActiveFile → setSourceFile(samePath) — skip the
+    // render while the user is mid-interaction: a render tears down an open color
+    // popup (the reported "popup closes itself" bug) or a focused comment editor.
+    // The store.load above still emits onChange → refresh(), guarded the same way.
+    if (!sameFile || !this.isBusy()) this.render();
   }
 
   /** Re-render from the store (call on store onChange for the active file). */
   refresh(): void {
-    // Don't yank a comment textarea out from under an in-progress edit. The
-    // debounced write triggers store reload → onChange → refresh; re-rendering
-    // mid-typing would destroy the focused element and lose the caret. The
-    // committing blur repaints the comment itself, so we lose nothing.
-    if (this.isEditing()) return;
+    // Don't tear down an in-progress interaction. The debounced comment write and
+    // any store reload emit onChange → refresh; re-rendering mid-interaction would
+    // destroy the focused comment textarea (losing the caret) or the open color
+    // popup. The committing action repaints, so we lose nothing.
+    if (this.isBusy()) return;
     this.render();
+  }
+
+  /** Is the user mid-interaction — editing a comment, or with a color popup open? */
+  private isBusy(): boolean {
+    return this.isEditing() || this.colorPopup !== null;
   }
 
   /** Is a comment textarea currently focused inside this panel? */

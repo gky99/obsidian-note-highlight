@@ -85,6 +85,7 @@ export default class MarginaliaPlugin extends Plugin implements SettingsHost {
       lookupByRange: (view, from, to) =>
         this.existingHighlight(view, (sourcePath) => this.store.annotationAt(sourcePath, from, to)),
       onRecolor: (t, color) => void this.store.updateColor(t.sourcePath, t.id, color),
+      onComment: (t, comment) => void this.store.updateComment(t.sourcePath, t.id, comment),
       onDelete: (t) => void this.store.deleteAnnotation(t.sourcePath, t.id),
     });
     toolbar.start();
@@ -207,6 +208,7 @@ export default class MarginaliaPlugin extends Plugin implements SettingsHost {
       sourcePath,
       id: res.annotation.id,
       color: normalizeColorValue(res.annotation.record.color),
+      comment: res.annotation.comment,
     };
   }
 

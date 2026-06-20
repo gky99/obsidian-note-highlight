@@ -37,7 +37,7 @@ export interface HighlightRequest {
   text: string;
 }
 
-/** An existing highlight the toolbar can recolor or delete (edit mode). */
+/** An existing highlight the toolbar can recolor, comment, or delete (edit mode). */
 export interface ExistingHighlight {
   /** Source note the annotation belongs to (sidecar key). */
   sourcePath: string;
@@ -45,6 +45,8 @@ export interface ExistingHighlight {
   id: string;
   /** Current color (token or hex), so the toolbar can mark it selected. */
   color: string;
+  /** Current comment prose, so the inline editor opens pre-filled. */
+  comment: string;
 }
 
 export interface SelectionToolbarDeps {
@@ -59,6 +61,8 @@ export interface SelectionToolbarDeps {
   lookupByRange: (view: MarkdownView, from: number, to: number) => ExistingHighlight | null;
   /** A swatch was clicked over an existing highlight: recolor it. */
   onRecolor: (target: ExistingHighlight, color: string) => void;
+  /** The inline comment editor committed a (changed) value: write it back. */
+  onComment: (target: ExistingHighlight, comment: string) => void;
   /** The delete button was clicked: remove the highlight. */
   onDelete: (target: ExistingHighlight) => void;
 }
@@ -88,6 +92,8 @@ export class SelectionToolbar {
   private builtSignature: string | null = null;
   /** The intent captured at show time, so a click is stable even if the selection clears. */
   private state: ToolbarState | null = null;
+  /** Flush for an open inline comment editor, so a dismiss-by-hide still saves. */
+  private commitComment: (() => void) | null = null;
   private readonly doc: Document = document;
   // resetTimer=true → fire after the selection settles (e.g. on drag release),
   // not mid-drag.
@@ -225,8 +231,10 @@ export class SelectionToolbar {
 
   /** (Re)build the swatch row, plus a delete button when editing. */
   private build(): void {
+    this.commitComment?.(); // flush an open comment editor before we tear it down
     const el = this.ensure();
     el.replaceChildren();
+    el.classList.remove('mrg-toolbar-commenting');
     const state = this.state;
     if (!state) return;
     const current = state.kind === 'edit' ? state.target.color : null;
@@ -248,6 +256,19 @@ export class SelectionToolbar {
     }
 
     if (state.kind === 'edit') {
+      const comment = this.doc.createElement('button');
+      comment.type = 'button';
+      comment.className = 'mrg-toolbar-comment';
+      const label = state.target.comment.trim().length > 0 ? 'Edit comment' : 'Add comment';
+      comment.title = label;
+      comment.setAttribute('aria-label', label);
+      setIcon(comment, 'message-square');
+      comment.addEventListener('click', (e) => {
+        e.preventDefault();
+        this.enterComment();
+      });
+      el.appendChild(comment);
+
       const del = this.doc.createElement('button');
       del.type = 'button';
       del.className = 'mrg-toolbar-delete';
@@ -260,6 +281,61 @@ export class SelectionToolbar {
       });
       el.appendChild(del);
     }
+  }
+
+  /**
+   * Swap the swatch row for an inline comment editor at the highlight, so a
+   * comment can be added without leaving for the aside panel. Commits the
+   * (changed) text on blur — clicking away, Escape, or Cmd/Ctrl+Enter — then
+   * closes; there is no live per-keystroke write, so the store never churns
+   * (and re-paints the highlight DOM out from under us) mid-edit.
+   */
+  private enterComment(): void {
+    const state = this.state;
+    if (state?.kind !== 'edit') return;
+    // Pin the toolbar open while the textarea has focus (a non-sticky edit would
+    // otherwise tear down when the selection clears).
+    state.sticky = true;
+    const target = state.target;
+
+    const el = this.ensure();
+    el.replaceChildren();
+    el.classList.add('mrg-toolbar-commenting');
+
+    const ta = this.doc.createElement('textarea');
+    ta.className = 'mrg-toolbar-comment-input';
+    ta.value = target.comment;
+    ta.rows = Math.max(2, target.comment.split('\n').length);
+    ta.placeholder = 'Add a comment…';
+
+    let done = false;
+    const commit = (): void => {
+      if (done) return;
+      done = true;
+      this.commitComment = null;
+      if (ta.value !== target.comment) this.deps.onComment(target, ta.value);
+    };
+    // So a dismiss that removes the element before `blur` fires still saves.
+    this.commitComment = commit;
+    ta.addEventListener('blur', () => {
+      commit();
+      this.hide();
+    });
+    ta.addEventListener('keydown', (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+        e.preventDefault();
+        ta.blur();
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation(); // don't let the toolbar's global Escape double-fire
+        ta.blur();
+      }
+    });
+
+    el.appendChild(ta);
+    this.builtSignature = null; // force a fresh swatch build if we ever reopen
+    this.reposition();
+    ta.focus();
   }
 
   /** A swatch was clicked: create (fresh selection) or recolor (existing). */
@@ -300,8 +376,12 @@ export class SelectionToolbar {
     el.className = 'mrg-selection-toolbar';
     el.setAttribute('role', 'toolbar');
     el.setAttribute('aria-label', 'Highlight');
-    // Don't steal focus or clear the selection when a button is pressed.
-    el.addEventListener('mousedown', (e) => e.preventDefault());
+    // Don't steal focus or clear the selection when a button is pressed — but
+    // the inline comment textarea MUST take focus (and place its caret) on click.
+    el.addEventListener('mousedown', (e) => {
+      if (e.target instanceof HTMLTextAreaElement) return;
+      e.preventDefault();
+    });
     this.doc.body.appendChild(el);
     this.el = el;
     return el;
@@ -327,6 +407,8 @@ export class SelectionToolbar {
   }
 
   private hide(): void {
+    this.commitComment?.(); // save an in-progress comment even if blur never fired
+    this.commitComment = null;
     this.el?.remove();
     this.el = null;
     this.builtSignature = null;
