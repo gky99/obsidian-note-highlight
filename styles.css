@@ -251,6 +251,39 @@
   transform: scale(1.15);
 }
 
+/* The current color when editing an existing highlight. */
+.mrg-toolbar-swatch.mrg-selected {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 1px;
+}
+
+/* Delete button in the toolbar's edit mode: a trash icon that reddens on hover. */
+.mrg-toolbar-delete {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 18px;
+  padding: 0;
+  margin-left: 2px;
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  border-left: 1px solid var(--background-modifier-border);
+  border-radius: 0;
+  box-shadow: none;
+  cursor: pointer;
+}
+
+.mrg-toolbar-delete:hover {
+  color: var(--text-error);
+}
+
+.mrg-toolbar-delete .svg-icon {
+  width: 15px;
+  height: 15px;
+}
+
 /* --- Settings palette swatch -------------------------------------------- */
 
 .mrg-settings-swatch {

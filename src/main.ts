@@ -23,7 +23,7 @@ import {
 import type { EditorView } from '@codemirror/view';
 
 import { DEFAULT_SETTINGS, type MarginaliaSettings } from '@/settings';
-import { AnnotationStore } from '@/store/store';
+import { AnnotationStore, type ResolvedAnnotation } from '@/store/store';
 import { jumpToAnnotation } from '@/navigation';
 import { isSidecarPath, sourcePathForSidecar } from '@/obsidian/sidecar-path';
 import {
@@ -34,6 +34,7 @@ import {
 } from '@/editor';
 import { renderAnnoBlock, makeReadingHighlighter, ANNO_LANGUAGE } from '@/reading';
 import { findSourceRange } from '@/text/locate';
+import { normalizeColorValue } from '@/color';
 import {
   ASIDE_VIEW_TYPE,
   MarginaliaAsideView,
@@ -41,6 +42,7 @@ import {
   SelectionToolbar,
   type SettingsHost,
   type HighlightRequest,
+  type ExistingHighlight,
 } from '@/ui';
 
 const MARKDOWN_VIEW_TYPE = 'markdown';
@@ -50,6 +52,13 @@ export default class MarginaliaPlugin extends Plugin implements SettingsHost {
   store!: AnnotationStore;
   /** Last painted highlight signature per source, to re-render reading mode only when it changes. */
   private readingSig = new Map<string, string>();
+  /**
+   * Last seen render mode per open view, so we can repaint exactly once when a
+   * pane toggles Reading ↔ Editing. Neither `file-open` nor `active-leaf-change`
+   * fires on a same-leaf mode switch, so without this the freshly-shown editor
+   * (or reading view) keeps no highlights until the next store change.
+   */
+  private lastModes = new WeakMap<MarkdownView, string>();
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -71,6 +80,12 @@ export default class MarginaliaPlugin extends Plugin implements SettingsHost {
       app: this.app,
       getColors: () => this.settings.palette,
       onHighlight: (req, color) => void this.highlightRequest(req, color),
+      lookupById: (view, id) =>
+        this.existingHighlight(view, (sourcePath) => this.store.getById(sourcePath, id)),
+      lookupByRange: (view, from, to) =>
+        this.existingHighlight(view, (sourcePath) => this.store.annotationAt(sourcePath, from, to)),
+      onRecolor: (t, color) => void this.store.updateColor(t.sourcePath, t.id, color),
+      onDelete: (t) => void this.store.deleteAnnotation(t.sourcePath, t.id),
     });
     toolbar.start();
     this.register(() => toolbar.destroy());
@@ -121,6 +136,8 @@ export default class MarginaliaPlugin extends Plugin implements SettingsHost {
     this.registerEvent(
       this.app.workspace.on('active-leaf-change', () => void this.syncActiveFile()),
     );
+    // Repaint a pane when it toggles Reading ↔ Editing (no file/leaf event fires).
+    this.registerEvent(this.app.workspace.on('layout-change', () => this.onLayoutChange()));
     this.registerEvent(this.app.metadataCache.on('changed', (file) => this.maybeReload(file)));
     this.registerEvent(
       this.app.vault.on('modify', (file) => {
@@ -172,6 +189,27 @@ export default class MarginaliaPlugin extends Plugin implements SettingsHost {
     return path;
   }
 
+  /**
+   * Build a toolbar edit target from a store lookup against the active view's
+   * source note. Used by the selection toolbar to recolor/delete the highlight
+   * the user clicked (by id) or selected over (by overlapping range).
+   */
+  private existingHighlight(
+    view: MarkdownView,
+    lookup: (sourcePath: string) => ResolvedAnnotation | undefined,
+  ): ExistingHighlight | null {
+    const file = view.file;
+    if (!file) return null;
+    const sourcePath = this.resolveSourcePath(file.path);
+    const res = lookup(sourcePath);
+    if (!res) return null;
+    return {
+      sourcePath,
+      id: res.annotation.id,
+      color: normalizeColorValue(res.annotation.record.color),
+    };
+  }
+
   private getAside(): MarginaliaAsideView | null {
     const leaf = this.app.workspace.getLeavesOfType(ASIDE_VIEW_TYPE)[0];
     return leaf && leaf.view instanceof MarginaliaAsideView ? leaf.view : null;
@@ -212,6 +250,26 @@ export default class MarginaliaPlugin extends Plugin implements SettingsHost {
    * actually changed (a comment edit must not flash the preview).
    */
   private repaint(sourcePath: string): void {
+    const specs = this.specsFor(sourcePath);
+    const signature = specSignature(specs);
+    const readingStale = this.readingSig.get(sourcePath) !== signature;
+    this.readingSig.set(sourcePath, signature);
+
+    for (const leaf of this.app.workspace.getLeavesOfType(MARKDOWN_VIEW_TYPE)) {
+      const view = leaf.view;
+      if (!(view instanceof MarkdownView) || view.file?.path !== sourcePath) continue;
+      this.lastModes.set(view, view.getMode());
+      if (view.getMode() === 'preview') {
+        if (readingStale) view.previewMode.rerender(true);
+      } else {
+        const cm = editorView(view.editor);
+        if (cm) setHighlights(cm, specs);
+      }
+    }
+  }
+
+  /** The anchored highlight specs for a source (empty if none/orphaned). */
+  private specsFor(sourcePath: string): HighlightSpec[] {
     const specs: HighlightSpec[] = [];
     for (const r of this.store.getResolved(sourcePath)) {
       if (r.result.status === 'anchored') {
@@ -223,20 +281,41 @@ export default class MarginaliaPlugin extends Plugin implements SettingsHost {
         });
       }
     }
+    return specs;
+  }
 
-    const signature = specs.map((s) => `${s.id}:${s.from}:${s.to}:${s.color ?? ''}`).join('|');
-    const readingStale = this.readingSig.get(sourcePath) !== signature;
-    this.readingSig.set(sourcePath, signature);
-
+  /**
+   * On any layout change, repaint each open markdown view whose render mode just
+   * flipped (Reading ↔ Editing). The per-view {@link lastModes} guard means a
+   * transition repaints exactly once, so resizes/other layout churn are ignored
+   * and reading mode never re-renders in a loop.
+   */
+  private onLayoutChange(): void {
     for (const leaf of this.app.workspace.getLeavesOfType(MARKDOWN_VIEW_TYPE)) {
       const view = leaf.view;
-      if (!(view instanceof MarkdownView) || view.file?.path !== sourcePath) continue;
-      if (view.getMode() === 'preview') {
-        if (readingStale) view.previewMode.rerender(true);
-      } else {
-        const cm = editorView(view.editor);
-        if (cm) setHighlights(cm, specs);
-      }
+      if (!(view instanceof MarkdownView) || !view.file) continue;
+      const mode = view.getMode();
+      if (this.lastModes.get(view) === mode) continue;
+      this.lastModes.set(view, mode);
+      this.repaintView(view);
+    }
+  }
+
+  /** Push the current highlights into one view (used when its mode flips). */
+  private repaintView(view: MarkdownView): void {
+    const file = view.file;
+    if (!file) return;
+    const sourcePath = this.resolveSourcePath(file.path);
+    const specs = this.specsFor(sourcePath);
+    if (view.getMode() === 'preview') {
+      // Entering reading mode: force the post-processor to re-run so highlights
+      // paint over the (possibly cached, un-highlighted) preview DOM.
+      this.readingSig.set(sourcePath, specSignature(specs));
+      if (specs.length > 0) view.previewMode.rerender(true);
+    } else {
+      // Entering editing mode: the CM editor starts with no decorations.
+      const cm = editorView(view.editor);
+      if (cm) setHighlights(cm, specs);
     }
   }
 
@@ -308,4 +387,9 @@ export default class MarginaliaPlugin extends Plugin implements SettingsHost {
 /** Obsidian exposes the underlying CM6 view as the undocumented `editor.cm`. */
 function editorView(editor: Editor): EditorView | undefined {
   return (editor as unknown as { cm?: EditorView }).cm;
+}
+
+/** Stable signature of a highlight set, to detect "did the painted set change?". */
+function specSignature(specs: HighlightSpec[]): string {
+  return specs.map((s) => `${s.id}:${s.from}:${s.to}:${s.color ?? ''}`).join('|');
 }

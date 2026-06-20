@@ -89,6 +89,22 @@ export class AnnotationStore {
     return this.entries.get(sourcePath)?.resolved.find((r) => r.annotation.id === id);
   }
 
+  /**
+   * The first *anchored* annotation whose live range overlaps `[from, to)`, or
+   * `undefined` if none. Backs the "one passage, one highlight" rule: the toolbar
+   * routes a selection over an existing highlight to edit mode, and
+   * {@link createHighlight} refuses to stack a new highlight on top of one.
+   */
+  annotationAt(sourcePath: string, from: number, to: number): ResolvedAnnotation | undefined {
+    const lo = Math.min(from, to);
+    const hi = Math.max(from, to);
+    return this.getResolved(sourcePath).find(
+      (r) =>
+        r.result.status === 'anchored' &&
+        Math.max(lo, r.result.range.from) < Math.min(hi, r.result.range.to),
+    );
+  }
+
   /** Drop any cached state for a source (e.g. on file delete). */
   forget(sourcePath: string): void {
     if (this.entries.delete(sourcePath)) this.emit(sourcePath);
@@ -156,6 +172,13 @@ export class AnnotationStore {
     const quote = tidyQuote(sourceText.slice(from, to));
     if (normalizeQuote(quote).length === 0) {
       new Notice('Marginalia: select some text to highlight.');
+      return null;
+    }
+
+    // A passage is highlighted at most once: never stack a new highlight on top
+    // of an existing one (the toolbar offers recolor/delete on overlap instead).
+    if (this.annotationAt(sourceFile.path, from, to)) {
+      new Notice('Marginalia: that text is already highlighted.');
       return null;
     }
 

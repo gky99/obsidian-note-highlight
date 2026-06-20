@@ -107,12 +107,24 @@ When adding a module, decide its zone first. If it can be pure, make it pure.
 
 - **Floating selection toolbar** (`src/ui/selection-toolbar.ts`) — the primary way to
   highlight, replacing the command-only flow. Deliberately a **DOM-level** controller
-  (watches `document` `selectionchange`, positions from the selection's client rect), NOT
-  a CM6 ViewPlugin — because **reading mode has no CodeMirror**, and a single surface must
-  serve both modes. Source range by mode: source/Live Preview → exact editor offsets;
-  reading mode → only the selected text, re-located in source via `@/text/locate`
-  (`findSourceRange`), best-effort, with a Notice on failure. Wired in `main.ts`
-  (`highlightRequest`). The old `src/editor/selection-toolbar.ts` (CM6) was removed.
+  (watches `document` `selectionchange` AND `mousedown`, positions from a live client
+  rect), NOT a CM6 ViewPlugin — because **reading mode has no CodeMirror**, and a single
+  surface must serve both modes. It has two intents (a `ToolbarState` union):
+  - **create** — a fresh selection over un-highlighted text → color swatches → highlight.
+    Source range by mode: source/Live Preview → exact editor offsets; reading mode → only
+    the selected text, re-located in source via `@/text/locate` (`findSourceRange`),
+    best-effort, with a Notice on failure. Wired in `main.ts` (`highlightRequest`).
+  - **edit** — clicking a painted `.mrg-highlight` (DOM `data-anno-id`, both modes), or
+    selecting over one, → the same swatches (current color marked) **plus a delete
+    button** → `onRecolor`/`onDelete` (`store.updateColor`/`deleteAnnotation`). A
+    click-opened edit is *sticky* (survives the selection collapsing; dismissed by an
+    outside click / Escape); a selection-over-highlight edit clears with the selection.
+    The plugin resolves the edit target via `existingHighlight` → `store.getById` (click)
+    / `store.annotationAt` (range).
+  - **One passage, one highlight** (no stacking): a selection overlapping an existing
+    highlight routes to *edit*, never create; and `store.createHighlight` itself refuses an
+    overlapping range (`annotationAt` guard) so the rule holds for the command too.
+  The old `src/editor/selection-toolbar.ts` (CM6) was removed.
 - **Palette** is `settings.palette: string[]` (tokens or `#hex`). It drives the toolbar
   swatches, the aside card color picker, and the default-color dropdown. `loadSettings`
   clones it (so edits don't alias `DEFAULT_SETTINGS`) and refuses an empty list.
