@@ -365,3 +365,68 @@ Net: the file is a faithful reading-note when rendered anywhere, and a complete 
 
 ---
 
+## 14. Highlight management surface (added 2026-06-20)
+
+Sections 1–13 describe the original design. This section is **append-only** and
+records what was added and learned after the toolbar landed — it does not revise
+the decisions above.
+
+### 14.1 The selection toolbar is one surface with two intents
+
+The floating toolbar (`src/ui/selection-toolbar.ts`) is the primary way to *manage*
+highlights, not just create them. It is a single DOM-level controller (§7, §8.2)
+watching `document` `selectionchange` **and** `mousedown`, with two intents modelled
+as a discriminated `ToolbarState`:
+
+- **create** — a fresh selection over un-highlighted text → palette swatches → highlight.
+- **edit** — clicking a painted `.mrg-highlight` (read by `data-anno-id`), or selecting
+  over one, → the same swatches with the current color marked **plus a delete button**.
+
+Why one surface, not a separate edit popup: the same control must serve source/Live
+Preview **and** reading mode, and reading mode has no CodeMirror (§7.2). The DOM
+`.mrg-highlight` element — painted identically by the CM6 extension and the reading-mode
+post-processor — is the *only* signal common to both modes, so it is the anchor for
+edit. A click opens a **sticky** edit (survives the selection collapsing; dismissed by
+an outside click / Escape); a selection-over-highlight edit is non-sticky and clears
+with the selection, exactly like create. The plugin resolves the clicked id / overlapping
+range into an edit target via the store (`getById` / `annotationAt`) and applies recolor
+/ delete through the existing write-back path (§9) — no new persistence surface.
+
+### 14.2 One passage, one highlight (no stacking)
+
+Stacked, overlapping highlights have no coherent color or delete semantics, so a passage
+is highlightable **at most once**. This is enforced in two places, defence-in-depth:
+
+- **UI routing** — a selection overlapping an existing highlight opens *edit*, never a
+  second *create*.
+- **Store invariant** — `createHighlight` refuses a range overlapping any anchored
+  highlight (`annotationAt` guard), so the rule also holds for the keyboard command and
+  any future caller, not just the toolbar.
+
+Overlap is computed against **live resolved ranges** (§6.3), never stored offsets — the
+guard inherits the resolver's honesty (an orphaned highlight occupies no range, so it
+never blocks a new one).
+
+### 14.3 Repaint on Reading ↔ Editing mode switch (lesson learned)
+
+**Symptom observed this session:** after toggling a pane between Reading and Editing,
+highlights vanished until the next store change (a new highlight or a delete) repainted
+them — which also made the edit toolbar look broken, since it needs a *painted* highlight
+to click.
+
+**Root cause:** repaint was driven only by `store.onChange` and by `file-open` /
+`active-leaf-change`. **None of those fire on a same-leaf mode toggle.** So the freshly
+shown CM editor came up with an empty `DecorationSet`, and the reading view re-rendered
+from a cache that predated the highlights.
+
+**Fix:** subscribe to the workspace `layout-change` event and repaint a view when its
+render mode actually flips, tracked per-view in a `WeakMap<MarkdownView, mode>`. The guard
+is load-bearing: `layout-change` also fires on pane resizes and other churn, and forcing a
+reading-mode `previewMode.rerender(true)` on every one would flicker (and could loop on
+notes whose quote legitimately can't be located in reading mode, §7.2). Repainting *only*
+on a real Reading↔Editing transition makes it fire **exactly once** per switch.
+
+**General principle:** treat *render mode* as a first-class input to repaint, alongside
+*which file is active* and *what the annotations are*. A correct highlight set is necessary
+but not sufficient — it must be re-pushed whenever the surface that displays it is rebuilt.
+
