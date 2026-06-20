@@ -130,6 +130,31 @@ export class MarginaliaAsideView extends ItemView {
     return active instanceof HTMLTextAreaElement && this.contentEl.contains(active);
   }
 
+  /** The source note the panel is currently showing (null = none). */
+  getSourcePath(): string | null {
+    return this.sourcePath;
+  }
+
+  // --- scroll sync --------------------------------------------------------
+
+  /**
+   * Scroll-sync target ({@link ScrollSync}): bring the card for `id` into view
+   * and mark it the "current" card — the highlight nearest the top of the
+   * document viewport as the reader scrolls. Skipped while the user is
+   * mid-interaction (editing a comment, color popup open) so the panel is never
+   * yanked out from under them; `block: 'nearest'` keeps the movement minimal so
+   * a card already on screen doesn't jump.
+   */
+  syncScrollTo(id: string): void {
+    if (this.isBusy()) return;
+    const card = this.cardEl(id);
+    if (!card) return;
+    const prev = this.contentEl.querySelector('.mrg-card.mrg-current');
+    if (prev && prev !== card) prev.removeClass('mrg-current');
+    card.addClass('mrg-current');
+    card.scrollIntoView({ block: 'nearest' });
+  }
+
   // --- reverse navigation -------------------------------------------------
 
   /** Scroll the card into view and focus it (e.g. when its highlight is clicked). */
@@ -175,7 +200,10 @@ export class MarginaliaAsideView extends ItemView {
     const aside = root.createDiv({ cls: 'mrg-aside' });
 
     const path = this.sourcePath;
-    const resolved = path ? this.deps.store.getResolved(path) : [];
+    // Order cards by where they sit in the source (top → bottom), not by sidecar
+    // file order — the sidecar collects records by id, which need not track the
+    // document. Orphans (no live range) sink to the end.
+    const resolved = path ? sortByPosition(this.deps.store.getResolved(path)) : [];
 
     if (!path || resolved.length === 0) {
       aside.createDiv({
@@ -388,6 +416,18 @@ export class MarginaliaAsideView extends ItemView {
 }
 
 // --- pure helpers (no obsidian runtime) -----------------------------------
+
+/**
+ * Order resolved annotations by their live document position (start offset),
+ * ascending. Orphaned annotations have no range and sink to the end. Ties and
+ * orphans keep their relative sidecar order (Array#sort is stable, ES2019+), so
+ * one-highlight-per-passage means anchored ties don't actually occur.
+ */
+function sortByPosition(resolved: ResolvedAnnotation[]): ResolvedAnnotation[] {
+  const start = (r: ResolvedAnnotation): number =>
+    r.result.status === 'anchored' ? r.result.range.from : Number.POSITIVE_INFINITY;
+  return [...resolved].sort((a, b) => start(a) - start(b));
+}
 
 /** Apply a color (built-in token or hex) to a card's left border. */
 function paintCardColor(card: HTMLElement, color: string): void {

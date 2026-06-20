@@ -16,7 +16,9 @@ export type FlashFn = (view: EditorView, from: number, to: number) => void;
 
 /**
  * Forward navigation: annotation card → its exact place in the source (§8.1).
- * Refuses to guess when the annotation is orphaned.
+ * Refuses to guess when the annotation is orphaned. `onBeforeScroll` fires right
+ * before the programmatic `scrollIntoView` so the caller can suppress scroll-sync
+ * for this jump (the panel shouldn't chase a scroll it caused).
  */
 export async function jumpToAnnotation(
   app: App,
@@ -24,6 +26,7 @@ export async function jumpToAnnotation(
   sourcePath: string,
   id: string,
   flash?: FlashFn,
+  onBeforeScroll?: () => void,
 ): Promise<void> {
   const resolved = store.getById(sourcePath, id);
   if (!resolved) return;
@@ -47,6 +50,10 @@ export async function jumpToAnnotation(
   const fromPos = editor.offsetToPos(from);
   const toPos = editor.offsetToPos(to);
   editor.setSelection(fromPos, toPos);
+  // Signal that the scroll about to happen is *ours* — a card click jumps the
+  // document, and the scroll-sync listener must not chase it back into the panel
+  // (the user clicked a specific card; the panel should stay put).
+  onBeforeScroll?.();
   editor.scrollIntoView({ from: fromPos, to: toPos }, true);
 
   // The CM6 EditorView is exposed (undocumented) as `editor.cm`; flash if we can.

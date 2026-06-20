@@ -272,7 +272,9 @@ A heading and the paragraph beneath it are **two separate blocks**, so a single 
 
 - A custom `ItemView` registered via `registerView`, placed in the right sidebar; tracks the active file via `workspace.on('file-open')`.
 - Renders one card per annotation: quote, editable comment, color, jump button.
-- **Marginalia alignment (stretch):** use `EditorView.coordsAtPos(pos)` to read each highlight's screen Y and absolutely-position cards to line up with their highlights. Recompute on scroll + `ViewUpdate`; compute only for viewport-near annotations and debounce. No existing plugin does this well — it's the differentiator, and the fiddliest part (card collision/stacking, overlapping highlights).
+- **Cards are ordered by document position**, not sidecar-file order (the sidecar collects records by id, which need not track the document). The aside sorts each render by the live anchored `range.from`; orphans (no range) sink to the end, keeping their relative file order (`Array#sort` is stable). Display-only — `store.getResolved` and the renderers are untouched.
+- **Scroll sync (`src/ui/scroll-sync.ts`):** one-way *document → panel*. A capture-phase `scroll` listener (so it catches the inner `.cm-scroller` / reading-preview scroller, which don't bubble) finds the painted `.mrg-highlight` nearest the top of the document viewport and brings its card into view (`scrollIntoView({block:'nearest'})`), marking it `.mrg-current`. Geometry is read from live client rects of the painted highlights — which carry `data-anno-id` in **both** modes — so no offset model or mode-specific scroller lookup is needed (the same reason the selection toolbar is a DOM controller, §7.1). rAF-coalesced; skipped while the panel is busy (comment edit / color popup) so the cards aren't yanked out from under an edit. The pure topmost-pick is unit-tested (`pickTopmostVisible`). Scrolling the panel does nothing back (no feedback loop). Depends on document-order cards (above), or the panel would jump around. A **card click** suppresses sync for a short window (`jumpToAnnotation`'s `onBeforeScroll` → `ScrollSync.suppress()`): the jump scrolls the document — and *centers* the target, so the topmost visible highlight is often an earlier one — so without suppression the panel would chase its own jump onto the wrong card.
+- **Marginalia alignment (stretch):** the above syncs *scroll position*; true side-by-side alignment would use `EditorView.coordsAtPos(pos)` to read each highlight's screen Y and absolutely-position cards to line up with their highlights. Recompute on scroll + `ViewUpdate`; compute only for viewport-near annotations and debounce. No existing plugin does this well — it's the differentiator, and the fiddliest part (card collision/stacking, overlapping highlights).
 
 ---
 
@@ -496,4 +498,44 @@ upstream guard is possible — `syncActiveFile()` could skip the reload entirely
 source path is unchanged, sparing the re-resolve on every `active-leaf-change` — but the
 panel-side `isBusy()` guard is the load-bearing fix, since `onChange` can also fire from a
 genuine background edit while a popup is open.
+
+### 14.6 Document-ordered cards + scroll sync (added 2026-06-20)
+
+Two related changes this session made the aside track the *document*, not the sidecar file.
+
+**Cards are ordered by document position.** The sidecar binds records by id and collects
+the `anno` blocks at the end of the file (§5.1), so on-disk order need not follow the
+prose. The aside's `render()` now sorts each pass by the live anchored `range.from`;
+orphans (no range) sink to the end, keeping their relative file order (`Array#sort` is
+stable, so the one-highlight-per-passage rule means anchored ties don't arise). This is
+**display-only** — `store.getResolved` and every renderer keep file order, since the
+editor/resolver don't care about it and the sidecar is the durable record.
+
+**Scroll sync — one-way document → panel.** As the reader scrolls the source, the card for
+the highlight nearest the top of the viewport is brought into view (`scrollIntoView({block:
+'nearest'})`) and tinted `.mrg-current`. `src/ui/scroll-sync.ts` is a **DOM-level
+controller** (`ScrollSync`), the same architectural choice as the selection toolbar (§14.1)
+and for the same reason: reading mode has no CodeMirror, so one surface must serve both
+modes. It listens for `scroll` in the **capture phase** (scroll doesn't bubble, but capture
+still reaches the inner `.cm-scroller` / reading-preview scroller) and reads highlight
+geometry straight from the painted `.mrg-highlight` elements — which carry `data-anno-id` in
+*both* modes — so no offset model or mode-specific scroller lookup is needed. The work is
+rAF-coalesced, scoped to the markdown view showing the panel's source, and **skipped while
+the panel `isBusy()`** (§14.5). The pure topmost-pick (`pickTopmostVisible`) is unit-tested.
+The sort above is a prerequisite: in file order the panel would jump around as you scroll.
+
+**Lesson learned — a programmatic scroll is indistinguishable from a user scroll, so
+suppress around your own.** Clicking a card jumps the document (`jumpToAnnotation` →
+`editor.scrollIntoView`); that scroll re-fired the sync listener and the panel chased its
+own jump. Worse, the jump *centers* the target, so the topmost *visible* highlight afterward
+is often an **earlier** one — the panel could scroll to a different card than the one
+clicked. `scroll` events fire (and are `isTrusted`) for programmatic scrolls just as for
+user ones, so the controller cannot tell them apart from the event alone. Fix:
+`jumpToAnnotation` fires an `onBeforeScroll` callback right before its `scrollIntoView`, and
+the plugin wires it to `ScrollSync.suppress()`, which ignores scrolls for a short window
+(`JUMP_SUPPRESS_MS = 400`). The window only needs to outlast that one non-animated scroll,
+so a genuine user scroll just after is still honored. **General principle:** when a
+component both *reacts to* and *causes* the same event, it must mark its own actions (a
+suppression window, a re-entrancy flag, or an explicit "this one is mine" signal) — the
+event stream alone won't distinguish them.
 

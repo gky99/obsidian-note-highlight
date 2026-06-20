@@ -159,6 +159,26 @@ When adding a module, decide its zone first. If it can be pure, make it pure.
 - **Aside card UI**: clicking a card jumps (no Jump button); the color control is one
   swatch button that opens a popup of palette swatches; each card has a trash/delete
   button (`store.deleteAnnotation`). Comment textarea is full-width.
+  - **Cards are ordered by document position**, not sidecar/file order (the sidecar binds
+    records by id, which need not track the document). The aside's `render()` sorts each
+    pass by the live anchored `range.from`; orphans (no range) sink to the end keeping
+    relative order (`Array#sort` is stable). Display-only — `store.getResolved` and the
+    renderers are untouched.
+  - **Scroll sync** (`src/ui/scroll-sync.ts`, Design.md §7.3): one-way *document → panel* —
+    scrolling the source brings the card for the topmost on-screen highlight into view
+    (`scrollIntoView({block:'nearest'})`) and marks it `.mrg-current`. A DOM controller
+    (capture-phase `scroll` to catch the non-bubbling inner scroller; reads `data-anno-id`
+    off the painted `.mrg-highlight`s, so it works in **both** modes with no offset model),
+    same rationale as the selection toolbar. rAF-coalesced; only reacts to the markdown
+    view showing the panel's source; **skipped while the panel `isBusy()`**. The pure
+    topmost-pick (`pickTopmostVisible`) is unit-tested. Depends on the document-order sort
+    above. Scrolling the panel does nothing back (no feedback loop). **A card click must
+    not move the panel:** the jump scrolls the document programmatically, which would
+    re-trigger sync (and, since the jump *centers* the target, often onto a different,
+    earlier highlight). `jumpToAnnotation` fires `onBeforeScroll` right before its
+    `scrollIntoView`; the plugin wires that to `scrollSync.suppress()`, which ignores
+    document scrolls for a short window (`JUMP_SUPPRESS_MS`) so the panel stays put while
+    a genuine user scroll just after is still honored.
   - **A re-render must not destroy transient foreground UI** (Design.md §14.5). The
     panel rebuilds on `render()`, which tears down the open color popup / focused comment
     editor. `refresh()` and `setSourceFile` therefore skip re-rendering while `isBusy()`
@@ -223,12 +243,14 @@ refusing.
 
 ## Status / next step
 
-Core is done and tested (177 unit tests). The runtime layers build and typecheck; the
+Core is done and tested (183 unit tests). The runtime layers build and typecheck; the
 selection toolbar, custom palette, custom save location, and aside card controls are in.
-**This session** reworked the sidecar format: `[/]:#` comment terminator, fault-isolated
-parsing, and then **decoupled `anno` blocks to the end of the file** (bound by id) with
-**short base36 ids** — see the RESOLVED note above. **Verified working in-vault:** highlighting
-via the toolbar in Live Preview, the aside panel, and reading-mode highlight rendering
-(incl. across inline formatting/links — covered by the e2e). Open items: the strict-write
-tradeoff (above) and the marginalia card-alignment stretch goal via `coordsAtPos`
-(Design.md §7.3).
+**This session** made the aside cards **document-ordered** (sorted by live `range.from`,
+orphans last) and added **scroll sync** (`src/ui/scroll-sync.ts`, one-way document → panel)
+— see the aside-UI bullets and Design.md §7.3. Prior session reworked the sidecar format
+(`[/]:#` comment terminator, fault-isolated parsing, `anno` blocks decoupled to the end of
+the file, short base36 ids). **Verified working in-vault:** highlighting via the toolbar in
+Live Preview, the aside panel, and reading-mode highlight rendering (incl. across inline
+formatting/links — covered by the e2e). Open items: the strict-write tradeoff (above) and
+the marginalia card-alignment stretch goal via `coordsAtPos` (Design.md §7.3) — note scroll
+sync now covers *scroll position*, alignment would add side-by-side card positioning.

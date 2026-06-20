@@ -108,6 +108,11 @@
   box-shadow: 0 0 0 2px var(--interactive-accent);
 }
 
+/* Scroll-sync: the card for the highlight currently nearest the document top. */
+.mrg-card.mrg-current {
+  background: var(--background-modifier-hover);
+}
+
 .mrg-card.mrg-orphaned {
   border-left-color: var(--text-error);
   opacity: 0.85;

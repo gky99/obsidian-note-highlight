@@ -6,6 +6,9 @@
 export { ASIDE_VIEW_TYPE, MarginaliaAsideView } from './aside-view';
 export type { AsideDeps } from './aside-view';
 
+export { ScrollSync } from './scroll-sync';
+export type { ScrollSyncDeps } from './scroll-sync';
+
 export { SelectionToolbar } from './selection-toolbar';
 export type {
   SelectionToolbarDeps,

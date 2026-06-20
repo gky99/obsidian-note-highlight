@@ -40,6 +40,7 @@ import {
   MarginaliaAsideView,
   MarginaliaSettingTab,
   SelectionToolbar,
+  ScrollSync,
   type SettingsHost,
   type HighlightRequest,
   type ExistingHighlight,
@@ -91,6 +92,15 @@ export default class MarginaliaPlugin extends Plugin implements SettingsHost {
     toolbar.start();
     this.register(() => toolbar.destroy());
 
+    // --- Scroll sync: keep the aside aligned with the document as it scrolls --
+    const scrollSync = new ScrollSync({
+      app: this.app,
+      getAside: () => this.getAside(),
+      resolveSourcePath: (path) => this.resolveSourcePath(path),
+    });
+    scrollSync.start();
+    this.register(() => scrollSync.destroy());
+
     // --- Reading mode -----------------------------------------------------
     this.registerMarkdownCodeBlockProcessor(ANNO_LANGUAGE, (src, el, ctx) =>
       renderAnnoBlock(src, el, ctx),
@@ -106,7 +116,9 @@ export default class MarginaliaPlugin extends Plugin implements SettingsHost {
           store: this.store,
           settings: this.settings,
           jumpTo: (sourcePath, id) =>
-            jumpToAnnotation(this.app, this.store, sourcePath, id, flashRange),
+            jumpToAnnotation(this.app, this.store, sourcePath, id, flashRange, () =>
+              scrollSync.suppress(),
+            ),
         }),
     );
 
