@@ -46,17 +46,40 @@ export async function jumpToAnnotation(
   if (!(view instanceof MarkdownView)) return;
 
   const { from, to } = resolved.result.range;
-  const editor = view.editor;
-  const fromPos = editor.offsetToPos(from);
-  const toPos = editor.offsetToPos(to);
-  editor.setSelection(fromPos, toPos);
   // Signal that the scroll about to happen is *ours* — a card click jumps the
   // document, and the scroll-sync listener must not chase it back into the panel
   // (the user clicked a specific card; the panel should stay put).
   onBeforeScroll?.();
+
+  if (view.getMode() === 'preview') {
+    // Reading mode: the CM editor is hidden, so `editor.scrollIntoView` would
+    // move an off-screen editor and leave the preview exactly where it is — the
+    // jump appears to do nothing. Scroll the active sub-view (the preview) to the
+    // highlight's line instead. `applyScroll` takes a line number, the same unit
+    // both sub-views use, so we derive it from the source offset. The reading-mode
+    // post-processor paints the highlight itself; there is no CM flash to give.
+    const sourceText = await app.vault.cachedRead(file);
+    view.currentMode.applyScroll(lineAtOffset(sourceText, from));
+    return;
+  }
+
+  const editor = view.editor;
+  const fromPos = editor.offsetToPos(from);
+  const toPos = editor.offsetToPos(to);
+  editor.setSelection(fromPos, toPos);
   editor.scrollIntoView({ from: fromPos, to: toPos }, true);
 
   // The CM6 EditorView is exposed (undocumented) as `editor.cm`; flash if we can.
   const cm = (editor as unknown as { cm?: EditorView }).cm;
   if (cm && flash) flash(cm, from, to);
+}
+
+/** 0-based line number containing source offset `offset` (newlines before it). */
+function lineAtOffset(text: string, offset: number): number {
+  let line = 0;
+  const end = Math.min(offset, text.length);
+  for (let i = 0; i < end; i++) {
+    if (text.charCodeAt(i) === 10 /* \n */) line++;
+  }
+  return line;
 }

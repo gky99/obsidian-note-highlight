@@ -78,12 +78,16 @@ export function renderAnnoBlock(
  *     line numbers we compute the element's source char-span (`sectionSpan`),
  *     i.e. which slice of the source this element renders.
  *  3. For each *anchored* annotation whose resolved range overlaps that span,
- *     derive the quote's plain-text projection (`projectQuoteToText`: strip
- *     block/emphasis markers, reduce links to their text, collapse whitespace)
- *     and search the *concatenation* of the element's text nodes for that string.
- *     On a hit, wrap the matched run in `span.mrg-highlight.mrg-color-<color>`
- *     with `data-anno-id` — splitting across inline elements into one span per
- *     contributing text node when the match straddles a boundary.
+ *     project the plain text of the *intersection* of the element's span with the
+ *     resolved range (`projectQuoteToText`: strip block/emphasis markers, reduce
+ *     links to their text, collapse whitespace) and search the *concatenation* of
+ *     the element's text nodes for that string. On a hit, wrap the matched run in
+ *     `span.mrg-highlight.mrg-color-<color>` with `data-anno-id` — splitting across
+ *     inline elements into one span per contributing text node when the match
+ *     straddles a boundary. Projecting the per-element slice (not the whole quote)
+ *     is what lets a quote spanning multiple block elements paint: each block
+ *     paints its own portion. When `getSectionInfo` returns null we can't slice,
+ *     so we fall back to searching the whole quote within the element.
  *
  * Conservatism guarantees:
  *  - Orphaned annotations are skipped.
@@ -110,11 +114,27 @@ export function makeReadingHighlighter(
 
       for (const { annotation, result } of resolved) {
         if (result.status !== 'anchored') continue; // skip orphans
-        if (span && !rangesOverlap(result.range.from, result.range.to, span.from, span.to)) {
-          continue;
+
+        // Choose what to search for in THIS element:
+        //  - with section info, project only the slice of source that this
+        //    element renders *and* the highlight covers (the intersection of the
+        //    element's span with the resolved range). This is what makes a quote
+        //    spanning several block elements paint: the post-processor only ever
+        //    sees one block at a time, so each contributing block paints its own
+        //    portion (§7.2). For a single-block highlight the slice is the whole
+        //    quote, so behavior is unchanged.
+        //  - without section info, fall back to projecting the whole quote.
+        let needle: string;
+        if (info && span) {
+          if (!rangesOverlap(result.range.from, result.range.to, span.from, span.to)) continue;
+          const from = Math.max(result.range.from, span.from);
+          const to = Math.min(result.range.to, span.to);
+          needle = projectQuoteToText(info.text.slice(from, to));
+        } else {
+          needle = projectQuoteToText(annotation.quote);
         }
-        const needle = projectQuoteToText(annotation.quote);
         if (needle.length === 0) continue;
+
         // Best-effort wrap; failure for one annotation must not affect others.
         try {
           highlightFirstMatch(el, needle, annotation);

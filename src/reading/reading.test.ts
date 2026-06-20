@@ -109,6 +109,33 @@ describe('makeReadingHighlighter', () => {
     expect(el.querySelector('a .mrg-highlight')?.textContent).toBe('Obsidian site');
   });
 
+  it('paints a quote that spans two block elements, one portion per block', () => {
+    // Source: "Alpha beta." (line 0) and "gamma delta." (line 1) are separate
+    // blocks; the highlight [6,17) covers "beta.\ngamma" across the block break.
+    // Each block must paint only its own overlapping slice — the whole quote
+    // never appears in a single element, so the old whole-needle search painted
+    // nothing here.
+    const TEXT = 'Alpha beta.\ngamma delta.';
+    const items = [anchored('beta. gamma', 6, 17)];
+
+    const block1 = paragraph('Alpha beta.');
+    makeReadingHighlighter(fakeStore(items))(block1, ctx({ text: TEXT, lineStart: 0, lineEnd: 0 }));
+    expect(block1.querySelector('.mrg-highlight')?.textContent).toBe('beta.');
+
+    const block2 = paragraph('gamma delta.');
+    makeReadingHighlighter(fakeStore(items))(block2, ctx({ text: TEXT, lineStart: 1, lineEnd: 1 }));
+    expect(block2.querySelector('.mrg-highlight')?.textContent).toBe('gamma');
+  });
+
+  it('does not paint a block the highlight does not reach', () => {
+    // Same source, but a highlight confined to line 0 must leave line 1 alone.
+    const TEXT = 'Alpha beta.\ngamma delta.';
+    const items = [anchored('beta', 6, 10)];
+    const block2 = paragraph('gamma delta.');
+    makeReadingHighlighter(fakeStore(items))(block2, ctx({ text: TEXT, lineStart: 1, lineEnd: 1 }));
+    expect(block2.querySelector('.mrg-highlight')).toBeNull();
+  });
+
   it('does not paint orphaned annotations', () => {
     const orphan = {
       annotation: { id: 'o', quote: 'brown fox', comment: '', record: { id: 'o', status: 'orphaned' } },

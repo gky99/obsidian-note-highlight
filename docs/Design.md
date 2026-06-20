@@ -267,6 +267,7 @@ A heading and the paragraph beneath it are **two separate blocks**, so a single 
 
 - `registerMarkdownPostProcessor` renders highlights.
 - `registerMarkdownCodeBlockProcessor("anno", …)` receives each block's raw text, ingests it into the store, and renders **nothing** (optionally a small clickable marker), making the block vanish.
+- **Cross-block highlights paint per block.** The post-processor runs once per rendered block, so for each element it projects only the *intersection* of that element's source span (`getSectionInfo` → `sectionSpan`) with the highlight's resolved range and searches the element for that slice — each contributing block paints its own portion, so a quote spanning paragraphs/list items renders as one highlight across them. (Earlier this was a documented limitation: searching each element for the *whole* quote never matched a multi-block quote.) Still best-effort and offset-*in*accurate by design — CM6 is the authoritative path.
 
 ### 7.3 The "aside" panel
 
@@ -289,9 +290,14 @@ jumpTo(anno):
   range := resolve(anno, read(sourceFile))     # live; never a stored offset
   if !range: flagOrphan(anno); return          # refuse to guess (§4.6)
   open sourceFile
-  setSelection(range); scrollIntoView(range, center)
-  dispatch transient flash decoration
+  if mode == preview:                          # reading mode (§8.1 note)
+    currentMode.applyScroll(lineAt(range.from))
+  else:                                         # source / Live Preview
+    setSelection(range); scrollIntoView(range, center)
+    dispatch transient flash decoration
 ```
+
+**Reading mode needs its own scroll.** In preview mode the CM editor is hidden, so `editor.scrollIntoView`/`setSelection` move an off-screen editor and the preview never budges — the jump silently does nothing. So `jumpToAnnotation` branches on `view.getMode()`: in preview it scrolls the active sub-view with `view.currentMode.applyScroll(line)` (line derived from the resolved offset; `applyScroll` is in line units, shared by both sub-views). The reading-mode highlight is painted by the post-processor, so there is no CM flash to dispatch. Edit/Live-Preview keeps the select-and-`scrollIntoView` path. (This is independent of orphaning — an anchored cross-block highlight resolves fine; the bug was purely the editor-only scroll.)
 
 Block-pin fallback uses native `workspace.openLinkText("Source#^h1", path)`.
 
@@ -538,4 +544,41 @@ so a genuine user scroll just after is still honored. **General principle:** whe
 component both *reacts to* and *causes* the same event, it must mark its own actions (a
 suppression window, a re-entrancy flag, or an explicit "this one is mine" signal) — the
 event stream alone won't distinguish them.
+
+### 14.7 Cross-block reading-mode highlights — paint *and* jump (lesson learned)
+
+**Symptoms reported:** highlights spanning a block boundary (e.g. a quote running across a
+paragraph break, or across the `*` / `Human Movement.` / `*` blocks of a web clip) didn't
+paint in reading mode, and clicking their aside card didn't navigate to them.
+
+**First lesson — diagnose against real data before theorizing.** The two symptoms *looked*
+like one root cause: if the highlight were orphaned, it would neither paint (orphans are
+skipped) nor jump (`jumpToAnnotation` refuses on orphaned). Tempting, tidy, and wrong.
+Resolving the actual sidecar against the actual source proved **every annotation anchors via
+exact match** — the resolver was never the problem. The bugs were two independent defects in
+the *render* and *navigation* layers. The five-minute scratch resolve (`parseSidecar` →
+`buildStructure({}, len)` → `resolve`, logging status per id) was worth more than any amount
+of reasoning about what *might* be orphaning.
+
+**Bug 1 — a per-element post-processor must slice per element.** `registerMarkdownPostProcessor`
+fires once per rendered **block**, and the painter searched each block for the *whole*
+projected quote. A multi-block quote appears in *no single block*, so it never matched. Fix:
+for each element, intersect its source span (`getSectionInfo` → `sectionSpan`) with the
+highlight's resolved range and project/paint only that slice (`info.text.slice(from,to)`).
+Each block paints its own portion → one highlight across blocks. Single-block highlights are
+unchanged (the slice is the whole quote). **General principle:** when a processor only ever
+sees a fragment of the whole, give it the matching fragment of the *target*, not the target
+entire.
+
+**Bug 2 — a hidden editor cannot scroll.** In reading mode the CM editor is off-screen, so
+`editor.scrollIntoView`/`setSelection` move an invisible view and the preview never budges —
+the jump silently no-ops. Fix: branch on `view.getMode()` and, in preview, scroll the active
+sub-view with `view.currentMode.applyScroll(line)` (the line-unit scroll both sub-views
+share, derived from the resolved offset). **General principle:** an API that targets "the
+editor" is mode-blind; reading mode is a *separate* surface and needs its own scroll/feedback
+path (the same reason the selection toolbar and scroll-sync are DOM controllers, §14.1).
+
+Both are unit-covered (`reading.test.ts` "spans two block elements"; the resolve invariant by
+the existing pipeline tests). Offset-accurate reading-mode highlighting remains a non-goal
+(§7.2) — these fixes keep reading mode a faithful *best-effort* mirror of the CM6 path.
 

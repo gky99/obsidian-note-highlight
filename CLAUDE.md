@@ -211,10 +211,16 @@ The fix (two parts):
   `[[a|b]]`→`b`, `[[a]]`→`a`, and drops images, so a needle over a link matches the
   rendered text (the renderer drops the URL + brackets).
 
-Remaining limitation (acceptable, by design): a quote spanning **block** boundaries
-(separate paragraphs / list items, which render as separate section elements) still won't
-paint — the post-processor and the concat are per-element. Offset-accurate reading-mode
-highlighting remains a **non-goal** (Design.md §7.2); CM6 is the authoritative path.
+**Cross-block painting — fixed (2026-06-20).** A quote spanning **block** boundaries
+(separate paragraphs / list items, which render as separate section elements) now paints:
+the post-processor runs per block, so for each element it projects only the *intersection*
+of that element's source span (`sectionSpan`) with the highlight's resolved range and paints
+that slice (`info.text.slice(from,to)` → `projectQuoteToText`). Each contributing block paints
+its own portion → visually one highlight across blocks (separators like a bare `*` paragraph
+project to empty and stay unpainted — acceptable). Single-block highlights are unchanged (the
+slice is the whole quote). The `getSectionInfo`-null path still falls back to whole-quote
+search. Offset-accurate reading-mode highlighting remains a **non-goal** (Design.md §7.2);
+CM6 is the authoritative path. Covered by `reading.test.ts` ("spans two block elements").
 
 ### Sidecar comment format + parse coupling — RESOLVED (2026-06-20)
 Reworked this session (see Design.md §5.1, §5.4, §10 #11, and the invariant bullets above).
@@ -243,14 +249,19 @@ refusing.
 
 ## Status / next step
 
-Core is done and tested (183 unit tests). The runtime layers build and typecheck; the
+Core is done and tested (185 unit tests). The runtime layers build and typecheck; the
 selection toolbar, custom palette, custom save location, and aside card controls are in.
-**This session** made the aside cards **document-ordered** (sorted by live `range.from`,
-orphans last) and added **scroll sync** (`src/ui/scroll-sync.ts`, one-way document → panel)
-— see the aside-UI bullets and Design.md §7.3. Prior session reworked the sidecar format
-(`[/]:#` comment terminator, fault-isolated parsing, `anno` blocks decoupled to the end of
-the file, short base36 ids). **Verified working in-vault:** highlighting via the toolbar in
-Live Preview, the aside panel, and reading-mode highlight rendering (incl. across inline
-formatting/links — covered by the e2e). Open items: the strict-write tradeoff (above) and
-the marginalia card-alignment stretch goal via `coordsAtPos` (Design.md §7.3) — note scroll
-sync now covers *scroll position*, alignment would add side-by-side card positioning.
+**This session** fixed two cross-block reading-mode bugs (real web-clip data): (1) a quote
+spanning multiple block elements now **paints** in reading mode — the per-block
+post-processor projects the per-element slice of the range, not the whole quote (Design.md
+§7.2, `reading.ts`); (2) clicking such a card now **jumps** in reading mode — the jump was
+editor-only (`editor.scrollIntoView` on the hidden CM editor moved nothing in preview), now
+mode-aware via `view.currentMode.applyScroll(line)` (Design.md §8.1, `navigation.ts`). Note:
+these highlights were never orphaned — the resolver anchors them fine; both bugs were in the
+render/jump layers. Prior sessions: document-ordered aside cards + one-way scroll sync
+(`src/ui/scroll-sync.ts`, Design.md §7.3); sidecar format rework (`[/]:#` terminator,
+fault-isolated parsing, end-of-file id-bound `anno` blocks, short base36 ids). Open items:
+the strict-write tradeoff (above) and the marginalia card-alignment stretch goal via
+`coordsAtPos` (Design.md §7.3). **Not yet re-verified in a live vault this session** — the
+fixes are covered by unit tests + typecheck/build; the reading-mode behaviors are best
+confirmed by the wdio e2e against real Obsidian.
