@@ -1,3 +1,11 @@
-# esbuild ships a native binary installed via its postinstall script; vite needs it.
+# Build-script approvals. pnpm >= 10 blocks dependency build scripts until each is
+# explicitly allowed (true) or denied (false) here; an undecided entry fails install.
 allowBuilds:
+  # esbuild ships a native binary installed via its postinstall script; vite needs it.
   esbuild: true
+  # WDIO e2e deps below. We drive Obsidian's bundled Chromium via wdio-obsidian-service,
+  # so we never need the Edge/Firefox driver binaries these download, nor classic-level's
+  # native leveldb addon (off our code path). Deny their build scripts.
+  classic-level: false
+  edgedriver: false
+  geckodriver: false

@@ -13,3 +13,7 @@ main.js.map
 
 # Test / coverage
 coverage/
+
+# WDIO e2e playground: downloaded Obsidian binaries + run artifacts
+.obsidian-cache/
+test/playground/**/.obsidian/workspace.json

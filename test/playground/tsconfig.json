@@ -1,0 +1,20 @@
+{
+  "comment": "Self-contained tsconfig for the WDIO e2e playground. Kept separate from the root tsconfig so `pnpm typecheck` (the runtime correctness gate) never pulls in WDIO/Mocha ambient types.",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "node",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "types": [
+      "node",
+      "@wdio/globals/types",
+      "@wdio/mocha-framework",
+      "wdio-obsidian-service"
+    ]
+  },
+  "include": ["wdio.conf.mts", "specs/**/*.ts"]
+}
