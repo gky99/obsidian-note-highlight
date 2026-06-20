@@ -79,9 +79,11 @@ export function renderAnnoBlock(
  *     i.e. which slice of the source this element renders.
  *  3. For each *anchored* annotation whose resolved range overlaps that span,
  *     derive the quote's plain-text projection (`projectQuoteToText`: strip
- *     block/emphasis markers, collapse whitespace) and search the element's
- *     text nodes for that exact string. On a hit, split the text node and wrap
- *     the match in `span.mrg-highlight.mrg-color-<color>` with `data-anno-id`.
+ *     block/emphasis markers, reduce links to their text, collapse whitespace)
+ *     and search the *concatenation* of the element's text nodes for that string.
+ *     On a hit, wrap the matched run in `span.mrg-highlight.mrg-color-<color>`
+ *     with `data-anno-id` — splitting across inline elements into one span per
+ *     contributing text node when the match straddles a boundary.
  *
  * Conservatism guarantees:
  *  - Orphaned annotations are skipped.
@@ -127,33 +129,51 @@ export function makeReadingHighlighter(
 }
 
 /**
- * Find the first text-node occurrence of `needle` inside `root` (skipping text
- * already inside a `.mrg-highlight`) and wrap it in a highlight span. Returns
- * `true` if a wrap happened.
+ * Find the first occurrence of `needle` in the rendered text of `root` (skipping
+ * text already inside a `.mrg-highlight`) and wrap it in highlight span(s).
+ * Returns `true` if a wrap happened.
  *
- * The needle is matched against a single text node's content. This intentionally
- * does NOT span across element boundaries (e.g. a phrase broken by a `<strong>`):
- * such cases are left unpainted rather than risk a wrong or partial wrap.
+ * The needle is matched against the *concatenation* of `root`'s text nodes in
+ * document order, so a phrase broken across inline elements (`<strong>`, `<a>`,
+ * `<code>`, …) still matches — the #1 reason real-note highlights failed to paint
+ * in reading mode. When the match straddles element boundaries, each contributing
+ * text node gets its own `.mrg-highlight` span (sharing the same `data-anno-id`),
+ * which renders as one contiguous highlight without restructuring the DOM.
  */
 function highlightFirstMatch(root: HTMLElement, needle: string, annotation: Annotation): boolean {
   const doc = root.ownerDocument;
   const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
     acceptNode(node: Node): number {
       if (isInsideHighlight(node)) return NodeFilter.FILTER_REJECT;
-      return node.nodeValue && node.nodeValue.includes(needle)
-        ? NodeFilter.FILTER_ACCEPT
-        : NodeFilter.FILTER_SKIP;
+      return node.nodeValue ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
     },
   });
 
-  const textNode = walker.nextNode() as Text | null;
-  if (!textNode || !textNode.nodeValue) return false;
+  // Snapshot every eligible text node with its [start, end) span in the
+  // concatenated text. We collect first, then wrap: wrapping splits only the
+  // node being wrapped, so the other snapshots stay valid.
+  const segments: { node: Text; start: number; end: number }[] = [];
+  let concat = '';
+  for (let n = walker.nextNode() as Text | null; n; n = walker.nextNode() as Text | null) {
+    if (!n.nodeValue) continue;
+    const start = concat.length;
+    concat += n.nodeValue;
+    segments.push({ node: n, start, end: concat.length });
+  }
 
-  const idx = textNode.nodeValue.indexOf(needle);
-  if (idx === -1) return false;
+  const matchStart = concat.indexOf(needle);
+  if (matchStart === -1) return false;
+  const matchEnd = matchStart + needle.length;
 
-  wrapRange(textNode, idx, idx + needle.length, annotation, doc);
-  return true;
+  let wrapped = false;
+  for (const { node, start, end } of segments) {
+    const from = Math.max(start, matchStart);
+    const to = Math.min(end, matchEnd);
+    if (from >= to) continue; // this node contributes nothing to the match
+    wrapRange(node, from - start, to - start, annotation, doc);
+    wrapped = true;
+  }
+  return wrapped;
 }
 
 /** Is `node` (or an ancestor up to nothing) already inside a `.mrg-highlight`? */

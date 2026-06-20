@@ -37,6 +37,13 @@ export function projectQuoteToText(quote: string): string {
       // (`#`) and any list-marker noise, per line.
       .map((line) => stripLeadingBlockMarkers(line))
       .join(' ')
+      // Reduce link/image syntax to the text the renderer actually shows, so a
+      // quote spanning a link still matches the rendered DOM (the renderer drops
+      // the URL and the brackets). Images contribute no text → removed.
+      .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
+      .replace(/\[\[[^\]|]*\|([^\]]*)\]\]/g, '$1') // [[target|alias]] → alias
+      .replace(/\[\[([^\]]*)\]\]/g, '$1') // [[target]] → target
+      .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1') // [text](url) → text
       // Remove inline emphasis / inline-code markers. These never contribute
       // characters to the rendered text, only styling.
       .replace(/[*_`]+/g, '')

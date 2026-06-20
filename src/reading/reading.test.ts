@@ -36,6 +36,13 @@ function paragraph(text = SENTENCE): HTMLElement {
   return el;
 }
 
+/** Build a <p> from HTML so a quote can straddle inline elements. */
+function richParagraph(html: string): HTMLElement {
+  const el = document.createElement('p');
+  el.innerHTML = html;
+  return el;
+}
+
 describe('makeReadingHighlighter', () => {
   it('wraps a plain-text quote when section info is available', () => {
     const paint = makeReadingHighlighter(fakeStore([anchored('brown fox', 10, 19)]));
@@ -65,6 +72,41 @@ describe('makeReadingHighlighter', () => {
     expect(span).not.toBeNull();
     expect(span?.style.backgroundColor).not.toBe('');
     expect(span?.className).not.toContain('mrg-color-');
+  });
+
+  it('wraps a quote that straddles an inline element (<strong>)', () => {
+    // Rendered "The quick <strong>brown fox</strong> jumps over the lazy dog."
+    // The projected needle "brown fox jumps" crosses the <strong> boundary.
+    const paint = makeReadingHighlighter(fakeStore([anchored('brown fox jumps', 10, 25)]));
+    const el = richParagraph('The quick <strong>brown fox</strong> jumps over the lazy dog.');
+    paint(el, ctx(null));
+
+    const spans = el.querySelectorAll('.mrg-highlight');
+    // One span per contributing text node (inside <strong> + the trailing text).
+    expect(spans.length).toBe(2);
+    const painted = Array.from(spans)
+      .map((s) => s.textContent)
+      .join('');
+    expect(painted).toBe('brown fox jumps');
+    // The inner span stays nested inside <strong> (DOM not restructured).
+    expect(el.querySelector('strong .mrg-highlight')?.textContent).toBe('brown fox');
+    spans.forEach((s) => expect(s.getAttribute('data-anno-id')).toBe('a1'));
+  });
+
+  it('wraps a quote whose projection spans a rendered link', () => {
+    // projectQuoteToText turns "[Obsidian site](url)" into "Obsidian site", and
+    // the painter matches across the <a> boundary.
+    const paint = makeReadingHighlighter(
+      fakeStore([anchored('See [Obsidian site](https://obsidian.md) for', 4, 25)]),
+    );
+    const el = richParagraph('See <a href="https://obsidian.md">Obsidian site</a> for more.');
+    paint(el, ctx(null));
+
+    const painted = Array.from(el.querySelectorAll('.mrg-highlight'))
+      .map((s) => s.textContent)
+      .join('');
+    expect(painted).toBe('See Obsidian site for');
+    expect(el.querySelector('a .mrg-highlight')?.textContent).toBe('Obsidian site');
   });
 
   it('does not paint orphaned annotations', () => {

@@ -36,6 +36,23 @@ describe('projectQuoteToText', () => {
     expect(projectQuoteToText('1. an ordered item')).toBe('an ordered item');
   });
 
+  it('reduces a markdown link to its visible text', () => {
+    expect(projectQuoteToText('see the [Obsidian site](https://obsidian.md) for more')).toBe(
+      'see the Obsidian site for more',
+    );
+  });
+
+  it('reduces wikilinks (plain and aliased) to their displayed text', () => {
+    expect(projectQuoteToText('refer to [[Some Note]] later')).toBe('refer to Some Note later');
+    expect(projectQuoteToText('refer to [[Some Note|that note]] later')).toBe(
+      'refer to that note later',
+    );
+  });
+
+  it('drops images (no rendered text)', () => {
+    expect(projectQuoteToText('before ![alt text](img.png) after')).toBe('before after');
+  });
+
   it('returns empty string for marker-only / blank input', () => {
     expect(projectQuoteToText('>')).toBe('');
     expect(projectQuoteToText('   ')).toBe('');

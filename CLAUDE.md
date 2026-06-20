@@ -122,38 +122,37 @@ When adding a module, decide its zone first. If it can be pure, make it pure.
 
 ## Known issues / unresolved
 
-### Reading-mode highlights don't render in the live vault (UNRESOLVED)
-Highlights paint in Live Preview/source (CM6) but **do not appear in reading mode** in
-the user's vault, despite the fixes below. Treat this as the open thread.
+### Reading-mode highlights — RESOLVED (2026-06-20)
+Reading-mode highlights paint correctly, verified against real Obsidian (v1.12.7) by
+`test/playground/specs/reading-highlight.e2e.ts` for plain prose, quotes spanning
+`**bold**`/`*italic*`/`` `code` ``, and quotes spanning links.
 
-What has been done:
-- `repaint()` (`main.ts`) re-renders preview-mode views via `previewMode.rerender(true)`,
-  gated on a per-source highlight signature (so comment edits don't flash the preview).
-  Reading mode has no live decoration channel — the post-processor must re-run to repaint.
-- The painter (`src/reading/reading.ts`) no longer hard-bails when `ctx.getSectionInfo(el)`
-  is null; it falls back to a verbatim text search over the element.
-- The painter is **proven correct in isolation** by `src/reading/reading.test.ts`
-  (happy-dom): it wraps a plain-text quote with and without section info. So the bug is
-  integration/timing, not the wrap logic.
+**Root cause was the painter, not timing.** The plumbing fixes (the `repaint()` gated
+`previewMode.rerender(true)`, the `getSectionInfo`-null fallback) were already correct —
+the e2e proved plain prose painted fine. The real failure was item #3 of the old debug
+list: `highlightFirstMatch` matched the needle **within a single text node**, so any
+quote crossing an inline element (`<strong>`, `<a>`, `<code>`) — the common case in real
+notes — never matched and silently went unpainted.
 
-Still broken after reload. Next step is **live debugging** — drop a temporary
-`new Notice(...)`/`console.log` into `makeReadingHighlighter` and check, in order:
-1. Is the post-processor even invoked for the note? Is `store.getResolved(ctx.sourcePath)`
-   non-empty at paint time (sourcePath vs store key, store-loaded-yet)?
-2. Does `previewMode.rerender(true)` actually re-run markdown post-processors in this
-   Obsidian build, and does it fire after the store has loaded?
-3. Was the test highlight over **inline-formatted** text? The painter wraps within a
-   SINGLE text node by design, so a selection crossing `**bold**`/links never paints in
-   reading mode (Live Preview is fine). Re-test with plain prose to rule this out.
+The fix (two parts):
+- `highlightFirstMatch` (`src/reading/reading.ts`) now matches against the
+  **concatenation of all the element's text nodes** in document order, then wraps each
+  contributing node's slice in its own `.mrg-highlight` span (same `data-anno-id`). One
+  match can become several adjacent spans — visually one highlight, no DOM restructuring.
+- `projectQuoteToText` (`src/reading/project.ts`) now reduces `[text](url)` →`text`,
+  `[[a|b]]`→`b`, `[[a]]`→`a`, and drops images, so a needle over a link matches the
+  rendered text (the renderer drops the URL + brackets).
 
-Offset-accurate reading-mode highlighting is a **non-goal** (Design.md §7.2); CM6 is the
-authoritative path and reading mode is the convenience layer. Don't over-invest here
-unless the plain-prose case is confirmed broken after the checks above.
+Remaining limitation (acceptable, by design): a quote spanning **block** boundaries
+(separate paragraphs / list items, which render as separate section elements) still won't
+paint — the post-processor and the concat are per-element. Offset-accurate reading-mode
+highlighting remains a **non-goal** (Design.md §7.2); CM6 is the authoritative path.
 
 ## Status / next step
 
 Core is done and tested. The runtime layers build and typecheck; the selection toolbar,
 custom palette, custom save location, and aside card controls were added this round.
 **Verified working in-vault:** highlighting via the toolbar in Live Preview, the aside
-panel. **Known broken:** reading-mode highlight rendering (see above). Stretch goal still
-open: marginalia card alignment via `coordsAtPos` (Design.md §7.3).
+panel, and reading-mode highlight rendering (incl. across inline formatting/links — see
+the resolved issue above, covered by the e2e). Stretch goal still open: marginalia card
+alignment via `coordsAtPos` (Design.md §7.3).
