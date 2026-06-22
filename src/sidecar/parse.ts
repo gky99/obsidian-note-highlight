@@ -113,19 +113,43 @@ function splitFrontmatter(text: string): FrontmatterSplit {
   };
 }
 
+/**
+ * Validate and normalize a record's `status`, migrating the legacy two-value
+ * enum to the §6.5 confidence enum: `anchored → exact` (never `unique` without
+ * evidence), `orphaned → orphan`. Returns `undefined` for an unrecognized value
+ * so the caller can raise a precise parse error.
+ */
+function migrateAnnoStatus(raw: unknown): AnnotationStatus | undefined {
+  switch (raw) {
+    case 'unique':
+    case 'exact':
+    case 'orphan':
+      return raw;
+    case 'anchored':
+      return 'exact';
+    case 'orphaned':
+      return 'orphan';
+    default:
+      return undefined;
+  }
+}
+
 /** Coerce a parsed `anno` YAML mapping into a typed {@link AnnoRecord}. */
 function toAnnoRecord(raw: Record<string, unknown>, fenceLine: number): AnnoRecord {
   const id = raw['id'];
   if (typeof id !== 'string' || id.length === 0) {
     throw new SidecarParseError(`anno block near line ${fenceLine + 1} is missing a string "id".`);
   }
-  const status = raw['status'];
-  if (status !== 'anchored' && status !== 'orphaned') {
+  const status = migrateAnnoStatus(raw['status']);
+  if (status === undefined) {
     throw new SidecarParseError(
-      `anno block "${id}" has an invalid status ${JSON.stringify(status)}; ` +
-        'expected "anchored" or "orphaned".',
+      `anno block "${id}" has an invalid status ${JSON.stringify(raw['status'])}; ` +
+        'expected "unique", "exact", or "orphan".',
     );
   }
+  // Normalize a legacy value in place so a round-trip rewrites it to the new
+  // enum (§6.5 migration); the cast below then carries the normalized record.
+  raw['status'] = status;
   // `comment` in an anno block is a derived presence hint (set on serialize from
   // the actual prose); never keep it on the in-memory record — the parsed
   // `Annotation.comment` is the single source of truth for the comment.

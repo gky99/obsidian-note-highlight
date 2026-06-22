@@ -26,6 +26,7 @@ import {
 } from '@/obsidian/metadata';
 import { sidecarPathForSource } from '@/obsidian/sidecar-path';
 import { normalize, normalizeQuote, quoteHash } from '@/text/normalize';
+import { bodyStart } from '@/text/frontmatter';
 import { contentHash } from '@/text/hash';
 import type { MarginaliaSettings } from '@/settings';
 
@@ -90,6 +91,14 @@ export class AnnotationStore {
    * still prompts. Rebuilt from disk after a reload; cleared on {@link forget}.
    */
   private resolvedSidecar = new Map<string, string>();
+  /**
+   * Highlights under an active in-session deletion run, by `sourcePath → ids`
+   * (§6.5). While suppressed, {@link resolveAll} holds the record untouched — it
+   * never repairs the quote to a fragment nor flips status — so a delete-by-word
+   * ends in an orphan that still carries the *original* quote. Driven by the
+   * editor's run tracker via {@link suppressRepair}/{@link releaseRepair}.
+   */
+  private suppressed = new Map<string, Set<string>>();
 
   /**
    * Optional collision prompt. Invoked only when a source's *first* sidecar would
@@ -225,7 +234,124 @@ export class AnnotationStore {
   /** Drop any cached state for a source (e.g. on file delete). */
   forget(sourcePath: string): void {
     this.resolvedSidecar.delete(sourcePath);
+    this.suppressed.delete(sourcePath);
     if (this.entries.delete(sourcePath)) this.emit(sourcePath);
+  }
+
+  /**
+   * Mark a highlight as being actively deleted in the editor (§6.5): its record
+   * is held untouched on subsequent loads until {@link releaseRepair}. Driven by
+   * the editor's deletion-run tracker.
+   */
+  suppressRepair(sourcePath: string, id: string): void {
+    let ids = this.suppressed.get(sourcePath);
+    if (!ids) this.suppressed.set(sourcePath, (ids = new Set()));
+    ids.add(id);
+  }
+
+  private dropSuppress(sourcePath: string, id: string): void {
+    const ids = this.suppressed.get(sourcePath);
+    if (!ids) return;
+    ids.delete(id);
+    if (ids.size === 0) this.suppressed.delete(sourcePath);
+  }
+
+  /**
+   * Which source is currently holding `id` for a deletion run. Resolving the
+   * source from the suppression map (rather than the active editor) keeps a run
+   * that ends after the user switched notes — e.g. on focus-loss — pointed at the
+   * file it actually started in.
+   */
+  private sourceFileOfRun(id: string): TFile | null {
+    for (const [path, ids] of this.suppressed) {
+      if (!ids.has(id)) continue;
+      const f = this.app.vault.getAbstractFileByPath(path);
+      return f instanceof TFile ? f : null;
+    }
+    return null;
+  }
+
+  /**
+   * A deletion run ended with the highlight **gone** (collapse): stop holding it
+   * and re-resolve. The original quote was held throughout, so the load path now
+   * orphans carrying that original passage. Best-effort.
+   */
+  releaseRepair(id: string): void {
+    const sourceFile = this.sourceFileOfRun(id);
+    if (!sourceFile) return;
+    this.dropSuppress(sourceFile.path, id);
+    void this.load(sourceFile);
+  }
+
+  /**
+   * A deletion run ended with the highlight **surviving** (settle / edit): commit
+   * the survivor from the editor's *exact* live range `[from, to)` over `docText`.
+   * This bypasses fuzzy resolution, which overshoots a shortened passage (it
+   * scores trailing substitutions above the deletion). Writes the new quote +
+   * context straight to the sidecar, then re-resolves (the survivor now matches
+   * exact). Best-effort — never throws into the editor callback.
+   */
+  async commitSurvivor(id: string, docText: string, from: number, to: number): Promise<void> {
+    const sourceFile = this.sourceFileOfRun(id);
+    if (!sourceFile) return;
+    this.dropSuppress(sourceFile.path, id);
+    const quote = tidyQuote(docText.slice(Math.min(from, to), Math.max(from, to)));
+    if (normalizeQuote(quote).length === 0) {
+      // Nothing meaningful survived → fall back to the orphan-with-original path.
+      void this.load(sourceFile);
+      return;
+    }
+    const n = this.settings.contextChars;
+    const before = contextBefore(docText, from, n);
+    const after = contextAfter(docText, to, n);
+    const qhash = quoteHash(quote);
+    const sidecarPath = this.entries.get(sourceFile.path)?.sidecarPath;
+    const file = sidecarPath ? this.fileAt(sidecarPath) : null;
+    if (file) {
+      try {
+        await this.rmw(file, (disk) => {
+          const a = disk.annotations.find((x) => x.id === id);
+          if (!a) return;
+          a.quote = quote;
+          a.record.before = before;
+          a.record.after = after;
+          a.record.qhash = qhash;
+        });
+      } catch {
+        // Strict-write refusal (malformed neighbor) / write error — the reload
+        // below still re-resolves the held original; never clobber.
+      }
+    }
+    await this.load(sourceFile);
+  }
+
+  /**
+   * An undo/redo hit an active deletion run: the held quote was never changed, so
+   * re-anchor it against the **live editor text** (the file may still lag the undo,
+   * and the live decoration is stale because an exclusive mark doesn't re-grow on a
+   * re-inserted edge). The quote is *held* (not repaired) — an undo restores content
+   * toward the original — and we update only the live result + status for an
+   * immediate repaint; the next autosave reload persists durably (§6.5).
+   */
+  recheckRun(id: string, liveText: string): void {
+    const sourceFile = this.sourceFileOfRun(id);
+    if (!sourceFile) return;
+    this.dropSuppress(sourceFile.path, id);
+    const entry = this.entries.get(sourceFile.path);
+    const r = entry?.resolved.find((x) => x.annotation.id === id);
+    if (!r) {
+      void this.load(sourceFile);
+      return;
+    }
+    const cache = this.app.metadataCache.getFileCache(sourceFile) ?? {};
+    const structure = buildStructure(cache, liveText.length);
+    const result = resolve(r.annotation, liveText, structure, {
+      fuzzyThreshold: this.settings.fuzzyThreshold,
+      contextChars: this.settings.contextChars,
+    });
+    r.result = result;
+    r.annotation.record.status = result.status === 'anchored' ? result.confidence : 'orphan';
+    this.emit(sourceFile.path);
   }
 
   /**
@@ -264,25 +390,123 @@ export class AnnotationStore {
     }
 
     const sourceText = await this.app.vault.cachedRead(sourceFile);
-    const resolved = this.resolveAll(sourceFile, sourceText, sidecar);
+    const { resolved, changed } = this.resolveAll(sourceFile, sourceText, sidecar);
     this.entries.set(sourceFile.path, { sidecarPath: sidecarFile.path, sidecar, resolved });
-    this.emit(sourceFile.path);
+    // Don't repaint while a deletion run is active: the held resolution is a fuzzy
+    // (over-extended) match, and repainting from it would corrupt the live CM
+    // decoration the editor reads to commit the survivor. The CM mapping keeps the
+    // decoration clean on its own meanwhile (§6.5).
+    if (!this.suppressed.has(sourceFile.path)) this.emit(sourceFile.path);
+    // Self-heal: persist repairs / status promotions once, best-effort and never
+    // clobbering (§6.5). Fire-and-forget — the in-memory state is already live, so
+    // rendering/navigation don't wait on the write.
+    if (changed.size > 0) void this.persistRepairs(sourceFile, sidecarFile, changed);
     return resolved;
   }
 
-  private resolveAll(sourceFile: TFile, sourceText: string, sidecar: Sidecar): ResolvedAnnotation[] {
+  /**
+   * Write back the §6.5 self-healing changes (repaired quote, refreshed context,
+   * status promotion/orphan) for `changed` ids, batched into one atomic write.
+   * Reads the new values from the live in-memory entry and applies them by id to
+   * the freshly-parsed on-disk sidecar. Strict by construction (via {@link rmw}):
+   * if another unit on disk is malformed the write refuses rather than clobber it
+   * (§10 #11); the in-memory repair still holds for the session. Best-effort —
+   * never throws into the load path.
+   */
+  private async persistRepairs(
+    sourceFile: TFile,
+    sidecarFile: TFile,
+    changed: Set<string>,
+  ): Promise<void> {
+    const entry = this.entries.get(sourceFile.path);
+    if (!entry) return;
+    try {
+      await this.rmw(sidecarFile, (disk) => {
+        for (const diskAnno of disk.annotations) {
+          if (!changed.has(diskAnno.id)) continue;
+          const mem = entry.sidecar.annotations.find((a) => a.id === diskAnno.id);
+          if (!mem) continue;
+          diskAnno.quote = mem.quote;
+          diskAnno.record.status = mem.record.status;
+          diskAnno.record.before = mem.record.before;
+          diskAnno.record.after = mem.record.after;
+          diskAnno.record.qhash = mem.record.qhash;
+          diskAnno.record.pin = mem.record.pin;
+          diskAnno.record.heading = mem.record.heading;
+        }
+      });
+    } catch {
+      // Strict-write refusal (a malformed unit elsewhere) or write error: keep the
+      // in-memory repair, never clobber. Self-healing retries on the next load.
+    }
+  }
+
+  /**
+   * Re-resolve every annotation and fold the §6.5 verdict back onto its record:
+   * `status` becomes the live confidence (`unique`/`exact`/`orphan`), and a fuzzy
+   * hit *repairs* the stored quote to the matched bytes + refreshes context so it
+   * resolves exact next time. Returns the resolutions plus the set of ids whose
+   * record actually changed, so {@link load} can persist them in one write.
+   */
+  private resolveAll(
+    sourceFile: TFile,
+    sourceText: string,
+    sidecar: Sidecar,
+  ): { resolved: ResolvedAnnotation[]; changed: Set<string> } {
     const cache = this.app.metadataCache.getFileCache(sourceFile) ?? {};
     const structure = buildStructure(cache, sourceText.length);
     const options = {
       fuzzyThreshold: this.settings.fuzzyThreshold,
       contextChars: this.settings.contextChars,
     };
-    return sidecar.annotations.map((annotation) => {
+    const n = this.settings.contextChars;
+    const changed = new Set<string>();
+    const suppressed = this.suppressed.get(sourceFile.path);
+
+    const resolved = sidecar.annotations.map((annotation) => {
       const result = resolve(annotation, sourceText, structure, options);
-      // Reflect the live verdict onto the in-memory record for display (§6.2 #5).
-      annotation.record.status = result.status === 'anchored' ? 'anchored' : 'orphaned';
+      // Held during an active in-session deletion run (§6.5): leave the record
+      // entirely untouched (original quote + status) so a delete-by-word ends in
+      // an orphan that still shows the original passage, not a fragment.
+      if (suppressed?.has(annotation.id)) return { annotation, result };
+      const r = annotation.record;
+      const before = JSON.stringify([r.status, annotation.quote, r.before, r.after, r.pin, r.heading]);
+
+      if (result.status === 'anchored') {
+        const { from, to } = result.range;
+        if (result.method === 'fuzzy') {
+          // The stored quote drifted: repair it to the matched bytes so it
+          // resolves exact next time (§6.5).
+          const repaired = tidyQuote(sourceText.slice(from, to));
+          annotation.quote = repaired;
+          r.qhash = quoteHash(repaired);
+        }
+        // Refresh the disambiguators when they did real work — a context-
+        // disambiguated or fuzzy anchor — recovering any signal (before/after,
+        // pin, heading) that has drifted, so cumulative nearby edits don't slowly
+        // starve an ambiguous highlight of evidence (§6.5). A plain unique exact
+        // hit never consults them, so it is left untouched (no churn). Structural
+        // fields update only when re-derivable, never cleared on a cache miss.
+        if (result.method === 'context' || result.method === 'fuzzy') {
+          r.before = contextBefore(sourceText, from, n);
+          r.after = contextAfter(sourceText, to, n);
+          const pinId = findEnclosingBlockId(cache, from);
+          if (pinId) r.pin = `^${pinId}`;
+          const headingPath = findEnclosingHeadingPath(cache, from);
+          if (headingPath) r.heading = headingPath;
+        }
+        r.status = result.confidence; // unique | exact
+      } else {
+        r.status = 'orphan';
+      }
+
+      if (JSON.stringify([r.status, annotation.quote, r.before, r.after, r.pin, r.heading]) !== before) {
+        changed.add(annotation.id);
+      }
       return { annotation, result };
     });
+
+    return { resolved, changed };
   }
 
   /** A short id not already used by this source's loaded annotations. */
@@ -310,6 +534,14 @@ export class AnnotationStore {
     const quote = tidyQuote(sourceText.slice(from, to));
     if (normalizeQuote(quote).length === 0) {
       new Notice('Marginalia: select some text to highlight.');
+      return null;
+    }
+
+    // The YAML frontmatter is metadata, not annotatable body text — and a highlight
+    // anchored there can't be re-resolved or painted (§6.5). Refuse rather than
+    // create one that would immediately orphan.
+    if (from < bodyStart(sourceText)) {
+      new Notice('Marginalia: highlight body text, not the note properties.');
       return null;
     }
 
@@ -396,7 +628,17 @@ export class AnnotationStore {
       before: contextBefore(sourceText, from, n),
       after: contextAfter(sourceText, to, n),
       qhash: quoteHash(quote),
-      status: 'anchored',
+      // §6.5: a fresh highlight is `unique` iff its quote occurs exactly once in
+      // the source **body** (so it takes the cheap re-anchor path on reload), else
+      // `exact`. The count excludes the frontmatter — matching the resolver, so a
+      // quote the YAML title duplicates is still born `unique` (Design.md §6.5).
+      status:
+        countOccurrences(
+          normalize(sourceText.slice(bodyStart(sourceText))).text,
+          normalizeQuote(quote),
+        ) === 1
+          ? 'unique'
+          : 'exact',
       color: color ?? this.settings.defaultColor,
       created: new Date().toISOString(),
     };
@@ -582,6 +824,20 @@ export class AnnotationStore {
 }
 
 // --- quote / context capture helpers ------------------------------------
+
+/** Count non-overlapping occurrences of `needle` in `hay` (both already normalized). */
+function countOccurrences(hay: string, needle: string): number {
+  if (needle.length === 0) return 0;
+  let count = 0;
+  let i = 0;
+  for (;;) {
+    const at = hay.indexOf(needle, i);
+    if (at === -1) break;
+    count++;
+    i = at + needle.length;
+  }
+  return count;
+}
 
 /**
  * Tidy a raw selection into a readable, stable quote: collapse intra-line

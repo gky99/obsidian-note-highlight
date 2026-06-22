@@ -25,6 +25,10 @@ import { flashField, flashRange as flashRangeImpl } from './flash';
 import { reverseNavPlugin } from './reverse-nav';
 import { highlightClickHandler } from './click';
 import { annoHideField } from './anno-hide';
+import { selfHealPlugin } from './self-heal';
+
+/** Default lull (ms) after which an unfinished deletion run settles (§6.5). */
+const DELETION_SETTLE_MS = 15_000;
 
 export type { HighlightSpec } from './highlights';
 
@@ -42,6 +46,18 @@ export interface EditorExtensionOptions {
    * hiding them (from `settings.revealAnnoOnCursor`). Defaults to `false`.
    */
   revealAnnoBlocks?: boolean;
+  /**
+   * In-session self-healing (§6.5): a highlight entered an active deletion run →
+   * suppress its repair (and repaint) so its live range stays clean. All three
+   * `onDeletionRun*` callbacks must be set to enable the guard.
+   */
+  onDeletionRunStart?: (id: string) => void;
+  /** Run ended, highlight survived → commit the survivor from the editor's exact range + text. */
+  onDeletionRunCommit?: (id: string, from: number, to: number, docText: string) => void;
+  /** Run ended, highlight collapsed → orphan with the original quote. */
+  onDeletionRunCollapse?: (id: string) => void;
+  /** An undo/redo hit an active run → re-anchor that highlight by content against `docText`. */
+  onDeletionRunRecheck?: (id: string, docText: string) => void;
 }
 
 /**
@@ -68,6 +84,23 @@ export function marginaliaEditorExtension(
 
   if (options.onHighlightClick) {
     extensions.push(highlightClickHandler(options.onHighlightClick));
+  }
+
+  if (
+    options.onDeletionRunStart &&
+    options.onDeletionRunCommit &&
+    options.onDeletionRunCollapse &&
+    options.onDeletionRunRecheck
+  ) {
+    extensions.push(
+      selfHealPlugin({
+        settleMs: DELETION_SETTLE_MS,
+        onRunStart: options.onDeletionRunStart,
+        onRunCommit: options.onDeletionRunCommit,
+        onRunCollapse: options.onDeletionRunCollapse,
+        onRunRecheck: options.onDeletionRunRecheck,
+      }),
+    );
   }
 
   return extensions;

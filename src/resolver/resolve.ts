@@ -1,25 +1,42 @@
 /**
  * The re-anchoring engine — "the spine" (Design.md §13). Re-resolves an
  * annotation's content selectors against the *current* source text on every use
- * and returns a live range, or honestly orphans (§4.6, §6.2, §6.3).
+ * and returns a live range, or honestly orphans (§4.6, §6.2, §6.3, §6.5).
  *
  * Nothing here mutates the annotation: `resolve` is pure. The caller flips
- * `status` and persists (§8).
+ * `status` and persists the repair (§6.5, §8).
  *
- * The whole cascade runs on the whitespace-normalized *projection* of each
- * scope, with `mapRange` carrying every hit back to true source offsets (§4.8).
- * Returned ranges are always in original `sourceText` offsets.
+ * Matching runs on the whitespace-normalized *projection* of the source **body**
+ * — a leading YAML frontmatter block is excluded ({@link bodyStart}), since its
+ * `title`/`description` routinely duplicate body text and are not annotatable.
+ * `mapRange` (plus the body-start `base`) carries every hit back to true source
+ * offsets (§4.8); returned ranges are always in original `sourceText` offsets.
+ * Searching the whole body projection (rather than block-by-block) is what lets a
+ * heading-spanning quote match across a block boundary (§6.4) — the structural
+ * pin/heading is then a *disambiguation signal*, not a search-space restriction.
+ *
+ * The §6.5 cascade:
+ *   - exact, globally unique, and `unique` last time → accept (the cheap path);
+ *   - exact otherwise → confirm/disambiguate by the {before, after, structural}
+ *     signals (pick all-three, else ≥2, else orphan);
+ *   - no exact hit → fuzzy, but only if the available signals confirm it, and
+ *     then the caller *repairs* the stored quote to the matched bytes.
+ * A signal "matches" only on an **exact** full-window agreement (§6.5 choice).
  */
-import type { Annotation, Range } from '@/model/types';
+import type { Annotation, AnnoRecord, Range } from '@/model/types';
 import { normalize, mapRange, normalizeQuote } from '@/text/normalize';
+import { bodyStart } from '@/text/frontmatter';
 
 import type { SourceStructure } from './structure';
 import { fuzzyLocate } from './fuzzy';
 
 export type ResolveMethod = 'exact' | 'context' | 'fuzzy';
 
+/** Whether the anchored match is the sole occurrence (gates the §6.5 cheap path). */
+export type AnchorConfidence = 'unique' | 'exact';
+
 export type ResolveResult =
-  | { status: 'anchored'; range: Range; method: ResolveMethod }
+  | { status: 'anchored'; range: Range; method: ResolveMethod; confidence: AnchorConfidence }
   | { status: 'orphaned'; reason: string };
 
 export interface ResolveOptions {
@@ -28,87 +45,37 @@ export interface ResolveOptions {
   /** dmp `Match_Threshold` for the fuzzy probe step (default 0.5). */
   matchThreshold?: number;
   /**
-   * How many normalized chars of `before`/`after` to weigh when disambiguating
-   * duplicate exact hits (default 30, matching the ~30-char context the format
-   * stores, §5.4). Only an upper bound — shorter stored context is used whole.
+   * How many normalized chars of `before`/`after` to weigh as a context signal
+   * (default 30, matching the ~30-char context the format stores, §5.4). Only an
+   * upper bound — a shorter stored window is used whole.
    */
   contextChars?: number;
 }
 
 const DEFAULT_CONTEXT_CHARS = 30;
 
-/** A candidate scope to search, in original source offsets, widest-last. */
-interface Scope {
-  region: Range;
-  /** For diagnostics / orphan reasons. */
-  label: string;
-}
-
-/** A single exact occurrence within a normalized scope. */
+/** A single exact occurrence within the normalized projection. */
 interface ExactHit {
-  /** Start index in the normalized scope text. */
+  /** Start index in the normalized text. */
   start: number;
-  /** End index (exclusive) in the normalized scope text. */
+  /** End index (exclusive) in the normalized text. */
   end: number;
 }
 
 /**
- * Does the normalized quote look like it spans a heading? A leading `#` run
- * (after optional list/quote markers) is the tell. We also treat an internal
- * ` #`-prefixed token as heading-spanning, since a heading can sit mid-quote.
- * Heading-spanning quotes can't live inside a single block, so we widen past the
- * pin scope eagerly for them (§6.4).
+ * The precomputed §6.5 confirmation signals for one annotation: the normalized,
+ * boundary-keeping `before`/`after` windows (capped at `contextChars`) and the
+ * structural regions (pin block / heading section) in true source offsets.
  */
-function looksHeadingSpanning(normQuote: string): boolean {
-  return /(^|\s)#{1,6}\s/.test(normQuote);
-}
-
-/**
- * Build the ordered list of scopes to try, narrowest-first (§6.2 step 2).
- *
- * - Always start at the pinned block (narrowest, least fragile).
- * - For heading-spanning quotes, the `headingThroughFollowing` window is
- *   inserted right after the pin so we widen *before* wasting an exact pass that
- *   structurally cannot succeed inside one block (§6.4).
- * - `headingRegion` (section body) and the whole document follow as fallbacks.
- *
- * Duplicate/again-null regions are skipped. The whole document is always the
- * final backstop.
- */
-function buildScopes(
-  anno: Annotation,
-  structure: SourceStructure,
-  sourceText: string,
-  headingSpanning: boolean,
-): Scope[] {
-  const scopes: Scope[] = [];
-  const seen = new Set<string>();
-  const push = (region: Range | null, label: string): void => {
-    if (!region) return;
-    if (region.to <= region.from) return;
-    const key = `${region.from}:${region.to}`;
-    if (seen.has(key)) return;
-    seen.add(key);
-    scopes.push({ region, label });
-  };
-
-  const pin = anno.record.pin;
-  const heading = anno.record.heading;
-
-  if (pin) push(structure.blockRegion(pin), `block ${pin}`);
-  if (headingSpanning && heading) {
-    push(structure.headingThroughFollowing(heading), `heading-through ${heading}`);
-  }
-  if (heading) {
-    push(structure.headingRegion(heading), `heading ${heading}`);
-    // Even for non-spanning quotes, the through-following window is a useful
-    // wider net before falling all the way to the document.
-    if (!headingSpanning) {
-      push(structure.headingThroughFollowing(heading), `heading-through ${heading}`);
-    }
-  }
-  push({ from: 0, to: sourceText.length }, 'document');
-  return scopes;
+interface Signals {
+  /** Normalized stored `before`, trailing boundary space kept, capped. Empty = unavailable. */
+  beforeTail: string;
+  /** Normalized stored `after`, leading boundary space kept, capped. Empty = unavailable. */
+  afterHead: string;
+  /** Enclosing pinned-block region (source offsets), or null if no/unknown pin. */
+  pinRegion: Range | null;
+  /** Enclosing heading-section region (source offsets), or null if no/unknown heading. */
+  headRegion: Range | null;
 }
 
 /** All occurrences of `needle` in `hay` (normalized text), non-overlapping. */
@@ -126,58 +93,24 @@ function findAllExact(hay: string, needle: string): ExactHit[] {
 }
 
 /**
- * Disambiguate >1 exact hits by `before`/`after` context (§6.1). Each candidate
- * is scored by how much of the (normalized, length-capped) stored context
- * agrees with the text immediately preceding/following the occurrence. The hit
- * with the strictly-greatest positive score wins; a tie returns `null` so the
- * caller falls through to fuzzy/orphan rather than guessing (§4.6).
+ * Build the §6.5 signals for a record. The `before` window keeps its trailing
+ * boundary space and the `after` window its leading one — that space is real in
+ * the haystack (the quote needle is trimmed, so the surrounding space lives in
+ * `before`/`after`); trimming it would break the exact full-window agreement.
  */
-function disambiguateByContext(
-  hay: string,
-  hits: ExactHit[],
-  before: string | undefined,
-  after: string | undefined,
+function buildSignals(
+  record: AnnoRecord,
+  structure: SourceStructure,
   contextChars: number,
-): ExactHit | null {
-  // Collapse stored context but KEEP the whitespace on the side that touches the
-  // quote — the boundary space between context and quote is real in the
-  // haystack (the quote needle is trimmed, so it begins/ends at a word, with the
-  // surrounding space living in `before`/`after`). `normalizeQuote` would trim
-  // that boundary space away and break suffix/prefix agreement. So we collapse
-  // and trim only the *outer* side: `before` keeps its trailing space, `after`
-  // keeps its leading space.
-  const nb = before ? normalize(before).text.replace(/^\s+/, '') : '';
-  const na = after ? normalize(after).text.replace(/\s+$/, '') : '';
-  const beforeTail = nb.slice(Math.max(0, nb.length - contextChars));
-  const afterHead = na.slice(0, contextChars);
-
-  if (beforeTail.length === 0 && afterHead.length === 0) return null;
-
-  let best: ExactHit | null = null;
-  let bestScore = 0;
-  let tie = false;
-
-  for (const hit of hits) {
-    let score = 0;
-    if (beforeTail.length > 0) {
-      const preceding = hay.slice(Math.max(0, hit.start - beforeTail.length), hit.start);
-      score += commonSuffixLen(preceding, beforeTail);
-    }
-    if (afterHead.length > 0) {
-      const following = hay.slice(hit.end, hit.end + afterHead.length);
-      score += commonPrefixLen(following, afterHead);
-    }
-    if (score > bestScore) {
-      bestScore = score;
-      best = hit;
-      tie = false;
-    } else if (score === bestScore && score > 0) {
-      tie = true;
-    }
-  }
-
-  if (bestScore === 0 || tie) return null;
-  return best;
+): Signals {
+  const nb = record.before ? normalize(record.before).text.replace(/^\s+/, '') : '';
+  const na = record.after ? normalize(record.after).text.replace(/\s+$/, '') : '';
+  return {
+    beforeTail: nb.slice(Math.max(0, nb.length - contextChars)),
+    afterHead: na.slice(0, contextChars),
+    pinRegion: record.pin ? structure.blockRegion(record.pin) : null,
+    headRegion: record.heading ? structure.headingRegion(record.heading) : null,
+  };
 }
 
 /** Length of the longest common suffix of `a` and `b`. */
@@ -201,12 +134,101 @@ function commonPrefixLen(a: string, b: string): number {
   return n;
 }
 
+/** Does the candidate's *preceding* text end with the full stored `before` window? */
+function beforeMatches(hay: string, from: number, s: Signals): boolean {
+  if (s.beforeTail.length === 0) return false;
+  const preceding = hay.slice(Math.max(0, from - s.beforeTail.length), from);
+  return commonSuffixLen(preceding, s.beforeTail) === s.beforeTail.length;
+}
+
+/** Does the candidate's *following* text start with the full stored `after` window? */
+function afterMatches(hay: string, to: number, s: Signals): boolean {
+  if (s.afterHead.length === 0) return false;
+  const following = hay.slice(to, to + s.afterHead.length);
+  return commonPrefixLen(following, s.afterHead) === s.afterHead.length;
+}
+
+/** Is the candidate (true source offset) inside the pinned block OR heading section? */
+function structuralMatches(rawFrom: number, s: Signals): boolean {
+  const inPin = !!s.pinRegion && rawFrom >= s.pinRegion.from && rawFrom < s.pinRegion.to;
+  const inHead = !!s.headRegion && rawFrom >= s.headRegion.from && rawFrom < s.headRegion.to;
+  return inPin || inHead;
+}
+
+const structuralAvailable = (s: Signals): boolean => s.pinRegion != null || s.headRegion != null;
+
 /**
- * Re-resolve `anno`'s selectors against the current `sourceText`.
+ * Count how many of the three §6.5 signals an exact hit satisfies. Each counts
+ * only when *available* (its field is stored) AND it matches; so a count of 3
+ * means all three were present and agreed. `base` is the body-start offset, added
+ * to the normalized hit so the structural test compares true source offsets.
+ */
+function matchedSignals(
+  norm: ReturnType<typeof normalize>,
+  hit: ExactHit,
+  s: Signals,
+  base: number,
+): number {
+  let n = 0;
+  if (beforeMatches(norm.text, hit.start, s)) n++;
+  if (afterMatches(norm.text, hit.end, s)) n++;
+  if (structuralAvailable(s) && structuralMatches(base + mapRange(norm, hit.start, hit.end).from, s)) {
+    n++;
+  }
+  return n;
+}
+
+/**
+ * §6.5 branch 2: choose among exact hits by signal agreement — the highest
+ * scorer wins, requiring at least 2 signals, and the **first** such hit (in
+ * document order) wins a tie at the top score. Returns null when no hit clears
+ * the 2-signal bar, so the caller orphans rather than guess from weak evidence.
+ */
+function pickByExactSignals(
+  norm: ReturnType<typeof normalize>,
+  hits: ExactHit[],
+  s: Signals,
+  base: number,
+): ExactHit | null {
+  let best: ExactHit | null = null;
+  let bestScore = 1; // require ≥2 to win
+  for (const hit of hits) {
+    const score = matchedSignals(norm, hit, s, base);
+    // Strictly-greater keeps the FIRST hit at any given top score (first-wins).
+    if (score > bestScore) {
+      best = hit;
+      bestScore = score;
+    }
+  }
+  return best;
+}
+
+/**
+ * §6.5 branch 3 gate: a fuzzy hit is trusted only when every *available* signal
+ * agrees exactly (vacuously true when none are stored, falling back to the fuzzy
+ * threshold). The quote bytes drifted, but the surrounding context/structure
+ * should be intact for a benign in-quote edit.
+ */
+function confirmFuzzy(
+  norm: ReturnType<typeof normalize>,
+  hit: ExactHit,
+  s: Signals,
+  base: number,
+): boolean {
+  if (s.beforeTail.length > 0 && !beforeMatches(norm.text, hit.start, s)) return false;
+  if (s.afterHead.length > 0 && !afterMatches(norm.text, hit.end, s)) return false;
+  if (structuralAvailable(s) && !structuralMatches(base + mapRange(norm, hit.start, hit.end).from, s)) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Re-resolve `anno`'s selectors against the current `sourceText` (§6.5).
  *
- * Cascade (§6.2): narrowest scope first; within each scope try exact (with
- * context disambiguation for duplicates) then fuzzy; widen scope on failure;
- * orphan only when nothing is confident. Never returns a guessed range.
+ * Never returns a guessed range: a globally-unique exact match is taken on the
+ * cheap path only when it was unique last time; otherwise context must confirm,
+ * and fuzzy is gated by the same signals before the caller repairs the quote.
  */
 export function resolve(
   anno: Annotation,
@@ -220,84 +242,93 @@ export function resolve(
   }
 
   const contextChars = options.contextChars ?? DEFAULT_CONTEXT_CHARS;
-  const headingSpanning = looksHeadingSpanning(needle);
-  const scopes = buildScopes(anno, structure, sourceText, headingSpanning);
+  const priorUnique = anno.record.status === 'unique';
+  const signals = buildSignals(anno.record, structure, contextChars);
 
-  // Pass 1: exact (+ context) across all scopes, narrowest-first. We prefer an
-  // exact hit in *any* scope over a fuzzy hit in a narrow one.
-  let sawAmbiguous = false;
-  for (const scope of scopes) {
-    const slice = sourceText.slice(scope.region.from, scope.region.to);
-    const norm = normalize(slice);
-    const hits = findAllExact(norm.text, needle);
+  // Exclude a leading YAML frontmatter block from the search: its title/description
+  // duplicate body text but are not annotatable, so a hit there is never the target.
+  // `base` carries every normalized offset back to true source offsets.
+  const base = bodyStart(sourceText);
+  const norm = normalize(sourceText.slice(base));
+  const hits = findAllExact(norm.text, needle);
+  const globalCount = hits.length;
+  // Did the (excluded) frontmatter also carry the quote? If so, a record marked
+  // ambiguous (`exact`) owes that ambiguity to the frontmatter, not a real body
+  // duplicate — used by branch 1b to recover a now-sole body match.
+  const inFrontmatter = base > 0 && normalize(sourceText.slice(0, base)).text.includes(needle);
 
-    if (hits.length === 1) {
-      const hit = hits[0];
-      return anchored(norm, hit.start, hit.end, scope.region.from, 'exact');
-    }
-    if (hits.length > 1) {
-      const chosen = disambiguateByContext(
-        norm.text,
-        hits,
-        anno.record.before,
-        anno.record.after,
-        contextChars,
-      );
-      if (chosen) {
-        return anchored(norm, chosen.start, chosen.end, scope.region.from, 'context');
-      }
-      // Ambiguous: multiple identical exact occurrences that `before`/`after`
-      // could not separate. Fuzzy cannot disambiguate identical text either —
-      // it would just re-find one of them and *guess*, the one thing §4.6
-      // forbids. Record it; if no unique exact hit turns up in a different
-      // scope, we orphan rather than pick arbitrarily.
-      sawAmbiguous = true;
-    }
+  // Branch 1 — globally unique AND unique last time: accept directly, no context
+  // check (the cheap path; the sole occurrence is almost certainly the same one).
+  if (globalCount === 1 && priorUnique) {
+    return anchored(norm, hits[0], 'exact', 'unique', base);
   }
 
-  if (sawAmbiguous) {
+  // Branch 1b — a sole body match whose *only* other occurrence(s) sat in the
+  // (now-excluded) frontmatter. The frontmatter was the entire source of the
+  // historical ambiguity that stamped this record `exact`, so the body match is
+  // unambiguous: anchor it and let the caller heal (method 'context' refreshes the
+  // stale frontmatter-pointing before/after; confidence 'unique' takes the cheap
+  // path next time). Without a frontmatter duplicate this stays the §6.5-A orphan.
+  if (globalCount === 1 && !priorUnique && inFrontmatter) {
+    return anchored(norm, hits[0], 'context', 'unique', base);
+  }
+
+  // Branch 2 — the exact quote is present: confirm/disambiguate by context. This
+  // also covers a *single* match whose history was ambiguous (prior !== unique),
+  // which must clear the context bar or orphan (§6.5 question A).
+  if (globalCount >= 1) {
+    const pick = pickByExactSignals(norm, hits, signals, base);
+    if (pick) {
+      const method: ResolveMethod = globalCount === 1 ? 'exact' : 'context';
+      const confidence: AnchorConfidence = globalCount === 1 ? 'unique' : 'exact';
+      return anchored(norm, pick, method, confidence, base);
+    }
+    // Exact bytes exist but context can't single out the right one. Fuzzy would
+    // only re-find the same bytes, so orphan rather than guess (§4.6).
     return {
       status: 'orphaned',
-      reason: 'multiple equally-plausible matches; context could not disambiguate',
+      reason:
+        globalCount === 1
+          ? 'single match was ambiguous before and context could not confirm it'
+          : 'multiple equally-plausible matches; context could not disambiguate',
     };
   }
 
-  // Pass 2: fuzzy, narrowest-first. Only after exact has failed everywhere, so a
-  // clean exact match elsewhere always wins over a fuzzy near-match. Reached only
-  // when no scope contained the exact quote at all (so no ambiguity to guess at).
-  for (const scope of scopes) {
-    const slice = sourceText.slice(scope.region.from, scope.region.to);
-    const norm = normalize(slice);
-    const hit = fuzzyLocate(norm.text, needle, {
-      threshold: options.fuzzyThreshold,
-      matchThreshold: options.matchThreshold,
-    });
-    if (hit) {
-      return anchored(norm, hit.from, hit.to, scope.region.from, 'fuzzy');
-    }
+  // Branch 3 — no exact hit: fuzzy (over the body), gated by context confirmation.
+  // A hit here is a *repair* (method 'fuzzy') — the caller rewrites the stored
+  // quote to the matched bytes so it resolves exact next time. Never marked
+  // 'unique' (no exact verification yet); the following load promotes it if it
+  // then resolves unique.
+  const fuzzy = fuzzyLocate(norm.text, needle, {
+    threshold: options.fuzzyThreshold,
+    matchThreshold: options.matchThreshold,
+  });
+  if (fuzzy && confirmFuzzy(norm, { start: fuzzy.from, end: fuzzy.to }, signals, base)) {
+    return anchored(norm, { start: fuzzy.from, end: fuzzy.to }, 'fuzzy', 'exact', base);
   }
 
   return {
     status: 'orphaned',
-    reason: `quote not found in any scope (tried: ${scopes.map((s) => s.label).join(', ')})`,
+    reason: 'quote not found: no exact match and no context-confirmed fuzzy match',
   };
 }
 
 /**
- * Map a normalized-scope `[start, end)` back to true source offsets, adding the
- * scope's base offset, and wrap it as an anchored result.
+ * Map a normalized `[start, end)` back to true source offsets and wrap it. `base`
+ * is the body-start offset stripped before normalization (0 when no frontmatter).
  */
 function anchored(
   norm: ReturnType<typeof normalize>,
-  start: number,
-  end: number,
-  base: number,
+  hit: ExactHit,
   method: ResolveMethod,
+  confidence: AnchorConfidence,
+  base: number,
 ): ResolveResult {
-  const local = mapRange(norm, start, end);
+  const range = mapRange(norm, hit.start, hit.end);
   return {
     status: 'anchored',
-    range: { from: base + local.from, to: base + local.to },
+    range: { from: base + range.from, to: base + range.to },
     method,
+    confidence,
   };
 }

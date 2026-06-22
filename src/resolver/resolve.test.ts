@@ -7,15 +7,18 @@ import { inMemoryStructure } from './structure';
 import type { SourceStructure } from './structure';
 
 /**
- * Build an {@link Annotation} from a quote + partial record. Status starts
- * `anchored`; the resolver must never mutate it.
+ * Build an {@link Annotation} from a quote + partial record. Status defaults to
+ * `unique` (a cleanly-tracked single-occurrence highlight, §6.5) so the common
+ * fixtures take the cheap path; the resolver must never mutate it. Override via
+ * `record.status` to exercise the was-ambiguous (`exact`) / recovered (`orphan`)
+ * paths.
  */
 function anno(quote: string, record: Partial<AnnoRecord> = {}): Annotation {
   return {
     id: record.id ?? 'test',
     quote,
     comment: '',
-    record: { id: record.id ?? 'test', status: 'anchored', ...record },
+    record: { id: record.id ?? 'test', status: 'unique', ...record },
   };
 }
 
@@ -66,7 +69,7 @@ describe('exact single-block match', () => {
     const before = JSON.parse(JSON.stringify(a));
     resolve(a, source, structure);
     expect(a).toEqual(before);
-    expect(a.record.status).toBe('anchored');
+    expect(a.record.status).toBe('unique');
   });
 });
 
@@ -466,6 +469,186 @@ describe('edge cases', () => {
     const result = resolve(anno(stored, { pin: '^p' }), source, structure, {
       fuzzyThreshold: 0.95,
     });
+    expect(result.status).toBe('orphaned');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 10. Self-healing re-anchor procedure (§6.5): confidence + the cheap path,
+//     the was-ambiguous gap case, fuzzy gating, and orphan-on-tie.
+// ---------------------------------------------------------------------------
+describe('self-healing re-anchor (§6.5)', () => {
+  const structure = inMemoryStructure({});
+
+  it('cheap path: a globally-unique quote that was unique anchors with confidence unique', () => {
+    const source = 'Alpha.\n\nThe singular phrase here.\n\nBeta.';
+    const result = resolve(anno('The singular phrase here', { status: 'unique' }), source, structure);
+    expect(result.status).toBe('anchored');
+    if (result.status !== 'anchored') throw new Error('unreachable');
+    expect(result.method).toBe('exact');
+    expect(result.confidence).toBe('unique');
+  });
+
+  it('gap case: a single match that was ambiguous before orphans without context (§6.5 A)', () => {
+    const source = 'Alpha.\n\nThe lonely phrase.\n\nBeta.';
+    // prior `exact` = was ambiguous; no before/after/structural to confirm with.
+    const result = resolve(anno('The lonely phrase', { status: 'exact' }), source, structure);
+    expect(result.status).toBe('orphaned');
+  });
+
+  it('contrast: the same single match anchors when it was unique before (cheap path)', () => {
+    const source = 'Alpha.\n\nThe lonely phrase.\n\nBeta.';
+    const result = resolve(anno('The lonely phrase', { status: 'unique' }), source, structure);
+    expectAnchored(result, source, 'The lonely phrase', 'exact');
+  });
+
+  it('gap case: a was-ambiguous single match anchors (and promotes to unique) when context confirms', () => {
+    const source = 'Lead text before. the target phrase. trailing words after.';
+    const result = resolve(
+      anno('the target phrase', {
+        status: 'exact',
+        before: 'Lead text before. ',
+        after: '. trailing words after',
+      }),
+      source,
+      structure,
+    );
+    expect(result.status).toBe('anchored');
+    if (result.status !== 'anchored') throw new Error('unreachable');
+    expect(result.confidence).toBe('unique'); // now the sole occurrence → safe for the cheap path next time
+  });
+
+  it('a context-disambiguated match among duplicates has confidence exact', () => {
+    const source = 'First: the phrase here ends one. Second: the phrase here ends two.';
+    const result = resolve(
+      anno('the phrase here', { status: 'exact', before: 'First: ', after: ' ends one' }),
+      source,
+      structure,
+    );
+    expect(result.status).toBe('anchored');
+    if (result.status !== 'anchored') throw new Error('unreachable');
+    expect(result.method).toBe('context');
+    expect(result.confidence).toBe('exact');
+  });
+
+  it('counts a context signal only on a full-window (exact) match (§6.5 choice)', () => {
+    // The stored `before` shares only its tail with the source (far end differs),
+    // so under EXACT matching the before-signal does not count → only `after` (1) → orphan.
+    const source = 'completely unrelated lead in to the phrase here.';
+    const result = resolve(
+      anno('the phrase', {
+        status: 'exact',
+        before: 'TOTALLY different lead in to ',
+        after: ' here',
+      }),
+      source,
+      structure,
+    );
+    expect(result.status).toBe('orphaned');
+  });
+
+  it('first-wins when two candidates tie on all signals (§6.5)', () => {
+    const source = 'X. the same words here. Y.\n\nX. the same words here. Y.';
+    const result = resolve(
+      anno('the same words here', { status: 'exact', before: 'X. ', after: '. Y' }),
+      source,
+      structure,
+    );
+    // Both occurrences match before+after identically → take the FIRST occurrence.
+    const range = expectAnchored(result, source, 'the same words here', 'context');
+    expect(range.from).toBe(source.indexOf('the same words here'));
+  });
+
+  it('rejects a fuzzy hit that lands outside the pinned block (structural gate)', () => {
+    const source = 'Block A: the quick brown fox jumped.\n\nBlock B: padding padding here.';
+    const blockB = regionOf(source, 'Block B: padding padding here.');
+    const s = inMemoryStructure({ blocks: { '^b': blockB } });
+    // 'fax' (typo) → no exact hit; the only fuzzy-able copy is in Block A, but the
+    // pin is Block B, so the structural signal fails and we orphan rather than repair.
+    const result = resolve(
+      anno('the quick brown fax jumped', { status: 'exact', pin: '^b' }),
+      source,
+      s,
+    );
+    expect(result.status).toBe('orphaned');
+  });
+
+  it('a fuzzy repair reports method fuzzy and confidence exact (never unique)', () => {
+    const source = 'pre.\n\nThe measured value was twenty-one in the end.';
+    const para = regionOf(source, 'The measured value was twenty-one in the end.');
+    const s = inMemoryStructure({ blocks: { '^p': para } });
+    const result = resolve(
+      anno('The measured value was twenty-two in the end', { status: 'unique', pin: '^p' }),
+      source,
+      s,
+    );
+    expect(result.status).toBe('anchored');
+    if (result.status !== 'anchored') throw new Error('unreachable');
+    expect(result.method).toBe('fuzzy');
+    expect(result.confidence).toBe('exact');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 8. Frontmatter is excluded from the search space. A web clip's YAML `title`
+//    duplicates its H1, so the quote occurs once in the frontmatter and once in
+//    the body — the body is the only annotatable copy (Live Preview renders the
+//    frontmatter as the Properties widget, with no text a decoration can land on).
+// ---------------------------------------------------------------------------
+describe('frontmatter exclusion (§6.5)', () => {
+  const structure = inMemoryStructure({});
+
+  // Mirrors the real failing sample: the page title in YAML frontmatter repeats
+  // the H1, so the quote occurs once in the frontmatter and once in the body.
+  const source = [
+    '---',
+    'title: "The Difference Between Good and Bad Tags • Zettelkasten Method"',
+    'source: "https://example.com"',
+    '---',
+    '## Summary',
+    'A paragraph.',
+    '',
+    '# The Difference Between Good and Bad Tags • Zettelkasten Method',
+    'When I search my archive…',
+  ].join('\n');
+  const quote = 'The Difference Between Good and Bad Tags';
+  /** Offset of the body (H1) occurrence — the second one in the file. */
+  const bodyAt = source.indexOf(quote, source.indexOf(quote) + 1);
+
+  it('anchors to the body H1, not the frontmatter title (cheap path when unique)', () => {
+    const result = resolve(anno(quote, { status: 'unique' }), source, structure);
+    const range = expectAnchored(result, source, quote, 'exact');
+    expect(range.from).toBe(bodyAt);
+  });
+
+  it('recovers a record mis-stamped `exact` with frontmatter-pointing context (branch 1b)', () => {
+    // Exactly the corrupt sample: status `exact`, before/after captured from the
+    // frontmatter title. Frontmatter excluded → the body H1 is the sole match.
+    const result = resolve(
+      anno(quote, {
+        status: 'exact',
+        before: '--- title: "',
+        after: ' • Zettelkasten Method" source',
+      }),
+      source,
+      structure,
+    );
+    const range = expectAnchored(result, source, quote, 'context');
+    expect(range.from).toBe(bodyAt);
+    if (result.status !== 'anchored') throw new Error('unreachable');
+    // Promoted so the next load takes the cheap path; the caller refreshes context.
+    expect(result.confidence).toBe('unique');
+  });
+
+  it('orphans a quote that lives ONLY in the frontmatter (no body occurrence)', () => {
+    const fmOnly = '---\nkeyword: zonkulon\n---\n# Heading\nBody without it.';
+    const result = resolve(anno('zonkulon', { status: 'unique' }), fmOnly, structure);
+    expect(result.status).toBe('orphaned');
+  });
+
+  it('still orphans a single ambiguous-history body match when frontmatter lacks it (§6.5 A preserved)', () => {
+    const src = '---\ntitle: Unrelated\n---\nAlpha.\n\nThe lonely phrase.\n\nBeta.';
+    const result = resolve(anno('The lonely phrase', { status: 'exact' }), src, structure);
     expect(result.status).toBe('orphaned');
   });
 });

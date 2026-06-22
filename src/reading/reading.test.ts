@@ -19,7 +19,7 @@ function fakeStore(items: ResolvedAnnotation[]): AnnotationStore {
 
 function anchored(quote: string, from: number, to: number, color = 'yellow'): ResolvedAnnotation {
   return {
-    annotation: { id: 'a1', quote, comment: '', record: { id: 'a1', status: 'anchored', color } },
+    annotation: { id: 'a1', quote, comment: '', record: { id: 'a1', status: 'exact', color } },
     result: { status: 'anchored', method: 'exact', range: { from, to } },
   } as unknown as ResolvedAnnotation;
 }
@@ -138,7 +138,7 @@ describe('makeReadingHighlighter', () => {
 
   it('does not paint orphaned annotations', () => {
     const orphan = {
-      annotation: { id: 'o', quote: 'brown fox', comment: '', record: { id: 'o', status: 'orphaned' } },
+      annotation: { id: 'o', quote: 'brown fox', comment: '', record: { id: 'o', status: 'exact' } },
       result: { status: 'orphaned' },
     } as unknown as ResolvedAnnotation;
     const paint = makeReadingHighlighter(fakeStore([orphan]));

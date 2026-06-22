@@ -41,7 +41,7 @@ heading: "Intro › Background"
 before: "…the words just before "
 after: " the words right after…"
 qhash: "3f9a"
-status: anchored
+status: exact
 color: yellow
 created: 2026-06-19T10:32:00Z
 comment: true
@@ -54,7 +54,7 @@ heading: "Methods"
 before: "…preceding sentence. "
 after: " The following sentence…"
 qhash: "b1c2"
-status: orphaned
+status: orphan
 color: green
 created: 2026-06-19T11:05:00Z
 comment: true
@@ -89,7 +89,7 @@ describe('parseSidecar — §5.2 worked example', () => {
       before: '…the words just before ',
       after: ' the words right after…',
       qhash: '3f9a',
-      status: 'anchored',
+      status: 'exact',
       color: 'yellow',
       created: '2026-06-19T10:32:00Z',
     });
@@ -102,7 +102,7 @@ describe('parseSidecar — §5.2 worked example', () => {
     const a = sidecar.annotations[1];
     // Markdown markers (`##`, `**`) are preserved verbatim (§6.4).
     expect(a.quote).toBe('## A quoted heading\nfollowed by text with **strong** emphasis');
-    expect(a.record.status).toBe('orphaned');
+    expect(a.record.status).toBe('orphan');
     expect(a.record.color).toBe('green');
     expect(a.comment).toBe(
       'This reference spans a heading and the paragraph under it — see §6.4.',
@@ -143,7 +143,7 @@ describe('round-trip safety', () => {
         {
           id: 'AA',
           quote: '## Heading line\nbody with **bold** and *italic*\nthird line',
-          record: { id: 'AA', status: 'anchored' },
+          record: { id: 'AA', status: 'exact' },
           comment: 'a comment',
         },
       ]),
@@ -165,7 +165,7 @@ describe('round-trip safety', () => {
           quote: 'quote',
           record: {
             id: 'BB',
-            status: 'anchored',
+            status: 'exact',
             color: 'pink',
             // Unknown forward-compatible keys must survive (index signature).
             weight: 3,
@@ -179,7 +179,7 @@ describe('round-trip safety', () => {
 
   it('handles an empty comment', () => {
     const s = makeSidecar([
-      { id: 'CC', quote: 'no comment here', record: { id: 'CC', status: 'orphaned' }, comment: '' },
+      { id: 'CC', quote: 'no comment here', record: { id: 'CC', status: 'orphan' }, comment: '' },
     ]);
     roundTrips(s);
     expect(parseSidecar(serializeSidecar(s)).annotations[0].comment).toBe('');
@@ -192,9 +192,9 @@ describe('round-trip safety', () => {
   it('handles multiple units in sequence', () => {
     roundTrips(
       makeSidecar([
-        { id: 'A1', quote: 'first', record: { id: 'A1', status: 'anchored' }, comment: 'c1' },
-        { id: 'A2', quote: 'second', record: { id: 'A2', status: 'orphaned' }, comment: 'c2' },
-        { id: 'A3', quote: 'third', record: { id: 'A3', status: 'anchored' }, comment: '' },
+        { id: 'A1', quote: 'first', record: { id: 'A1', status: 'exact' }, comment: 'c1' },
+        { id: 'A2', quote: 'second', record: { id: 'A2', status: 'orphan' }, comment: 'c2' },
+        { id: 'A3', quote: 'third', record: { id: 'A3', status: 'exact' }, comment: '' },
       ]),
     );
   });
@@ -207,7 +207,7 @@ describe('round-trip safety', () => {
           quote: 'q',
           record: {
             id: 'DD',
-            status: 'anchored',
+            status: 'exact',
             before:
               'a very long lead-in context string that would normally be wrapped by YAML — with an em-dash, "double quotes", and -- a double hyphen --> arrow-ish run, kept verbatim',
             after: ' …trailing context with more than eighty characters so we exercise the lineWidth:-1 guard fully…',
@@ -241,7 +241,7 @@ and a list:
 
 \`\`\`anno
 id: XYZ
-status: anchored
+status: exact
 comment: true
 \`\`\`
 `;
@@ -271,13 +271,13 @@ comment for A
 
 \`\`\`anno
 id: A
-status: anchored
+status: exact
 comment: true
 \`\`\`
 
 \`\`\`anno
 id: B
-status: anchored
+status: exact
 \`\`\`
 `;
     const annotations = parseSidecar(text).annotations;
@@ -305,7 +305,7 @@ not part of the comment
 
 \`\`\`anno
 id: A
-status: anchored
+status: exact
 comment: true
 \`\`\`
 `;
@@ -324,7 +324,7 @@ annotates: "Clips/Note.md"
 
 \`\`\`anno
 id: Q1
-status: anchored
+status: exact
 \`\`\`
 `;
     const a = parseSidecar(text).annotations[0];
@@ -350,12 +350,12 @@ note A
 
 \`\`\`anno
 id: BB
-status: anchored
+status: exact
 \`\`\`
 
 \`\`\`anno
 id: AA
-status: anchored
+status: exact
 comment: true
 \`\`\`
 `;
@@ -371,8 +371,8 @@ comment: true
   it('serializes every anno block to the end of the file, after the quotes', () => {
     const out = serializeSidecar(
       makeSidecar([
-        { id: 'AA', quote: 'qa', record: { id: 'AA', status: 'anchored' }, comment: 'ca' },
-        { id: 'BB', quote: 'qb', record: { id: 'BB', status: 'anchored' }, comment: '' },
+        { id: 'AA', quote: 'qa', record: { id: 'AA', status: 'exact' }, comment: 'ca' },
+        { id: 'BB', quote: 'qb', record: { id: 'BB', status: 'exact' }, comment: '' },
       ]),
     );
     // Both quotes precede the first anno block in the serialized output.
@@ -385,7 +385,7 @@ comment: true
 describe('comment presence flag + terminator (serialize)', () => {
   it('emits comment: true and the [/]:# terminator only when a comment exists', () => {
     const withComment = makeSidecar([
-      { id: 'WC', quote: 'q', record: { id: 'WC', status: 'anchored' }, comment: 'hello note' },
+      { id: 'WC', quote: 'q', record: { id: 'WC', status: 'exact' }, comment: 'hello note' },
     ]);
     const out = serializeSidecar(withComment);
     expect(out).toContain('comment: true');
@@ -393,7 +393,7 @@ describe('comment presence flag + terminator (serialize)', () => {
     expect(parseSidecar(out)).toEqual(withComment);
 
     const noComment = makeSidecar([
-      { id: 'NC', quote: 'q', record: { id: 'NC', status: 'anchored' }, comment: '' },
+      { id: 'NC', quote: 'q', record: { id: 'NC', status: 'exact' }, comment: '' },
     ]);
     const out2 = serializeSidecar(noComment);
     expect(out2).not.toContain('comment: true');
@@ -415,7 +415,7 @@ a note
 
 \`\`\`anno
 id: F
-status: anchored
+status: exact
 comment: true
 \`\`\`
 `;
@@ -436,7 +436,7 @@ annotates: "Clips/Note.md"
 
 \`\`\`anno
 id: Z9
-status: anchored
+status: exact
 \`\`\`
 
 c
@@ -456,7 +456,7 @@ annotates: "Clips/Note.md"
 
 \`\`\`anno
 id: OTHER
-status: anchored
+status: exact
 \`\`\`
 `;
     const issues: ParseIssue[] = [];
@@ -470,7 +470,7 @@ status: anchored
       {
         id: 'BLANK',
         quote: 'first paragraph\n\nsecond paragraph',
-        record: { id: 'BLANK', status: 'anchored' },
+        record: { id: 'BLANK', status: 'exact' },
         comment: '',
       },
     ]);
@@ -487,7 +487,7 @@ describe('fence collision (§4.4 / §10 #10)', () => {
         quote: 'q',
         record: {
           id: 'FENCE',
-          status: 'anchored',
+          status: 'exact',
           // A context string literally containing a code fence.
           before: 'preceding text with ``` a triple backtick run in it',
         },
@@ -508,7 +508,7 @@ describe('fence collision (§4.4 / §10 #10)', () => {
         quote: 'q',
         record: {
           id: 'FENCE2',
-          status: 'anchored',
+          status: 'exact',
           before: 'edge ````` five backticks ````` here',
         },
         comment: '',
@@ -524,7 +524,7 @@ describe('fence collision (§4.4 / §10 #10)', () => {
       {
         id: 'VERB',
         quote: 'q',
-        record: { id: 'VERB', status: 'anchored', after: 'has ``` ticks' },
+        record: { id: 'VERB', status: 'exact', after: 'has ``` ticks' },
         comment: '',
       },
     ]);
@@ -544,7 +544,7 @@ annotates: "Clips/Note.md"
 
 \`\`\`anno
 id: X
-status: anchored
+status: exact
 \`\`\`
 
 c
@@ -569,7 +569,7 @@ annotates: "Clips/Note.md"
 
 \`\`\`anno
 id: X
-status: anchored
+status: exact
 \`\`\`
 
 c
@@ -583,9 +583,40 @@ c
   });
 });
 
+describe('status migration (§6.5)', () => {
+  const withStatus = (status: string) =>
+    `---\nschema: webclip-annotations/1\nannotates: "Clips/Note.md"\n---\n\n` +
+    `> hello world ^anno-X\n\n\`\`\`anno\nid: X\nstatus: ${status}\n\`\`\`\n`;
+
+  it('migrates the legacy two-value enum on read', () => {
+    expect(parseSidecar(withStatus('anchored')).annotations[0].record.status).toBe('exact');
+    expect(parseSidecar(withStatus('orphaned')).annotations[0].record.status).toBe('orphan');
+  });
+
+  it('preserves the new confidence enum verbatim', () => {
+    for (const s of ['unique', 'exact', 'orphan'] as const) {
+      expect(parseSidecar(withStatus(s)).annotations[0].record.status).toBe(s);
+    }
+  });
+
+  it('rewrites a legacy value to the new enum on serialize (round-trip migration)', () => {
+    const out = serializeSidecar(parseSidecar(withStatus('anchored')));
+    expect(out).toMatch(/status: exact/);
+    expect(out).not.toMatch(/status: anchored/);
+  });
+
+  it('never silently promotes a legacy value to "unique" (no evidence)', () => {
+    expect(parseSidecar(withStatus('anchored')).annotations[0].record.status).not.toBe('unique');
+  });
+
+  it('throws on an unrecognized status', () => {
+    expect(() => parseSidecar(withStatus('bogus'))).toThrow(SidecarParseError);
+  });
+});
+
 describe('malformed input', () => {
   it('throws SidecarParseError when there is no frontmatter', () => {
-    expect(() => parseSidecar('> q   ^anno-X\n\n```anno\nid: X\nstatus: anchored\n```\n')).toThrow(
+    expect(() => parseSidecar('> q   ^anno-X\n\n```anno\nid: X\nstatus: exact\n```\n')).toThrow(
       SidecarParseError,
     );
   });
@@ -604,7 +635,7 @@ just prose, no blockquote
 
 \`\`\`anno
 id: ORPHANBLOCK
-status: anchored
+status: exact
 \`\`\`
 `;
     // No quote references ORPHANBLOCK, so the record is dead data: dropped silently
@@ -625,7 +656,7 @@ annotates: "Clips/Note.md"
 
 \`\`\`anno
 id: X
-status: anchored
+status: exact
 `;
     expect(() => parseSidecar(text)).toThrow(SidecarParseError);
   });
@@ -669,7 +700,7 @@ annotates: "Clips/Note.md"
 
 \`\`\`anno
 id: G1
-status: anchored
+status: exact
 \`\`\`
 
 > bad status   ^anno-B1
@@ -683,7 +714,7 @@ status: bogus
 
 \`\`\`anno
 id: G2
-status: anchored
+status: exact
 \`\`\`
 `;
     const issues: ParseIssue[] = [];
@@ -704,14 +735,14 @@ annotates: "Clips/Note.md"
 
 \`\`\`anno
 id: G
-status: anchored
+status: exact
 \`\`\`
 
 > dangling   ^anno-D
 
 \`\`\`anno
 id: D
-status: anchored
+status: exact
 `;
     const issues: ParseIssue[] = [];
     const sidecar = parseSidecar(text, (i) => issues.push(i));

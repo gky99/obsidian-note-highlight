@@ -17,8 +17,15 @@ export interface Range {
   to: number;
 }
 
-/** An annotation is either anchored to a live source range, or orphaned (§4.6). */
-export type AnnotationStatus = 'anchored' | 'orphaned';
+/**
+ * Persisted anchor confidence (§6.5). `unique` = exact match *and* the sole
+ * candidate in scope; `exact` = anchored but among several / via context;
+ * `orphan` = not confidently located. It is *read* to gate the cheap re-anchor
+ * path and *written* from the live resolve verdict. Replaces the old
+ * `anchored | orphaned`; legacy values migrate on read (`anchored → exact`,
+ * `orphaned → orphan`).
+ */
+export type AnnotationStatus = 'unique' | 'exact' | 'orphan';
 
 /**
  * File-level metadata, stored as YAML frontmatter at the top of a sidecar.
@@ -60,7 +67,7 @@ export interface AnnoRecord {
   after?: string;
   /** Hash of the whitespace-normalized quote; matches across reformatting. */
   qhash?: string;
-  /** Whether the resolver could currently locate the quote. */
+  /** Anchor confidence; load-bearing for the §6.5 cheap re-anchor path. */
   status: AnnotationStatus;
   /** Presentation: highlight color name/token. */
   color?: string;

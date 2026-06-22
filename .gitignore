@@ -14,6 +14,9 @@ main.js.map
 # Test / coverage
 coverage/
 
+# Local scratch sample notes / sidecars (bug repros, not part of the plugin)
+samples/
+
 # WDIO e2e playground: downloaded Obsidian binaries + run artifacts
 .obsidian-cache/
 test/playground/**/.obsidian/workspace.json

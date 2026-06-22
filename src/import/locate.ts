@@ -21,6 +21,7 @@
  * case/punctuation-sensitive); the two serve different callers and stay separate.
  */
 import type { Range } from '@/model/types';
+import { bodyStart } from '@/text/frontmatter';
 
 /** Markdown markers that carry styling/structure, not rendered text. */
 const MARKER_CHARS = new Set(['*', '_', '`', '#', '>', '|', '~']);
@@ -137,8 +138,12 @@ export function locateMark(source: string, text: string): Range | null {
   const needle = normalizeNeedle(text);
   if (needle.length === 0) return null;
 
-  const { norm, off } = projectSource(source);
+  // Skip a leading YAML frontmatter block: the clip's `title`/`description`
+  // duplicate body text, so a mark could otherwise locate into the un-annotatable
+  // frontmatter (Design.md §6.5). `base` maps the hit back to a true source offset.
+  const base = bodyStart(source);
+  const { norm, off } = projectSource(source.slice(base));
   const i = norm.join('').indexOf(needle);
   if (i === -1) return null;
-  return { from: off[i], to: off[i + needle.length - 1] + 1 };
+  return { from: base + off[i], to: base + off[i + needle.length - 1] + 1 };
 }

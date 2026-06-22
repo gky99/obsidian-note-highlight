@@ -203,7 +203,7 @@ comment: true
 | `heading` | Heading path of the enclosing section (fallback scope). | Low |
 | `before` / `after` | ~30 chars / ~5 words of context each side. Disambiguates duplicate quotes; tolerates edits elsewhere. | Medium |
 | `qhash` | Hash of the whitespace-normalized quote; matches across reformatting. | — |
-| `status` | `anchored` \| `orphaned`. | — |
+| `status` | `unique` \| `exact` \| `orphan` — anchor confidence; load-bearing for the cheap re-anchor path (§6.5). Legacy `anchored`→`exact`, `orphaned`→`orphan` on read. | — |
 | `comment` | `true` iff comment prose follows the block. Derived presence hint; the prose is the source of truth, so the parser strips it. | — |
 | `color`, `created`, … | Presentation / metadata. | — |
 
@@ -241,10 +241,12 @@ resolve(anno, sourceText):
         if hits  > 1: return disambiguateBy(before, after)
   4. fuzzy := fuzzyMatch(anno.quote, scope, threshold)   # diff-match-patch
         if fuzzy: return mapBack(fuzzy)
-  5. anno.status := "orphaned"; surfaceForReview(); return NONE   # never guess
+  5. anno.status := "orphan"; surfaceForReview(); return NONE   # never guess (status enum is unique|exact|orphan, self-healing — §6.5)
 ```
 
 Resolution runs on a **whitespace-normalized projection** of the source, with an index map back to true offsets (§4.8). The same function feeds both highlight rendering and navigation — there is exactly one resolver.
+
+> **As implemented (§6.5):** the resolver searches the **whole** projection rather than narrowing to the pinned-block → heading → document scopes above. The pin/heading became a *confirmation signal* instead of a search-space restriction — simpler, and it matches heading-spanning quotes (§6.4) for free. The scope-narrowing in the pseudocode above is now an available *performance* optimization (search the pinned region first), not a correctness requirement.
 
 ### 6.3 Live re-resolution, not stored positions
 
@@ -257,6 +259,45 @@ A heading and the paragraph beneath it are **two separate blocks**, so a single 
 - The quote selector legitimately contains Markdown markers (`##`, `**`); match the **raw source form** and keep markers in the normalized projection — do not stem them away.
 - For heading-inclusive references, pin to the heading and **widen the search window** to run from the pinned heading *through the following block(s)*, rather than assuming the whole quote lives in one block.
 - Single-paragraph highlights remain clean single-block anchors. Branch on this in the resolver. **This is the one place the design quietly corrupts if implemented wrong — give it dedicated test cases.**
+
+### 6.5 Self-healing references (added 2026-06-21)
+
+The selector is not merely *re-resolved* every use (§6.3) — it is **actively kept equal to the live source bytes**. This sharpens §4.5: we still never store an offset, but we *do* rewrite the content selector (quote + context + pin/heading) whenever we can prove where the passage moved. So **fuzzy and orphan become transient, not resting, states**: a fuzzy hit is a *repair trigger* (re-capture the exact bytes so the next resolution is exact again), and an orphan is a *display-only* verdict surfaced in the aside that recovers on its own the moment the text reappears. The §4.6 guarantee is untouched — every rewrite is gated either by an **observed in-editor edit** or by **before/after/heading confirmation**; we never rewrite toward a guess.
+
+**`status` carries the anchor confidence: `unique | exact | orphan`** (replacing the old `anchored | orphaned`). `unique` = exact match *and* the sole occurrence in the document; `exact` = anchored but among several / via context; `orphan` = not confidently located. The field does double duty — it is **read** to gate the cheap path (below) and **written** on every successful anchor, derived from the current candidate count. It is persisted (orphan included) because the cheap path needs the *historical* uniqueness, which a recompute-on-load cannot reconstruct. Legacy sidecars migrate on read: `anchored → exact`, `orphaned → orphan` (never `unique` without evidence); writes use the new enum.
+
+**Re-anchor procedure** — load-time, and the in-session fallback (below). Runs on the normalized projection of the **whole body**, *not* block-by-block — searching the whole projection is what lets a heading-spanning quote match across a block boundary (§6.4), and it makes the structural pin/heading **one of three confirmation signals** — `{before, after, structural}` — rather than a search restriction. (A later optimization may probe the pinned scope first purely for speed; it would not change the signals below.) A signal counts **only on an exact, full-window agreement** (the boundary-adjacent context must reappear verbatim, normalized). Let `E` = exact matches of the stored quote in the **body**:
+
+| case | action |
+|---|---|
+| `\|E\| == 1` **and** prior status `unique` | accept directly — no context check, no rewrite (quote is already exact). The one cheap path. |
+| `\|E\| == 1`, prior **not** `unique`, **and the quote also occurs in the (excluded) frontmatter** | accept the sole body match and **promote to `unique`** — the frontmatter was the entire source of the historical ambiguity that stamped it `exact`, so the body match is now unambiguous; refresh the (stale, frontmatter-pointing) context. The frontmatter-recovery path. |
+| `\|E\| ≥ 1` otherwise (several, *or* a single match whose prior status was **not** `unique` with no frontmatter twin) | score each hit over `{before, after, structural}` and take the highest, requiring **≥ 2** (all-three beats two); **first-wins** on a tie; if none clears two, **orphan**. Bytes are exact → refresh context/pin, no quote rewrite. |
+| `\|E\| == 0` | fuzzy over the body; accept **only** when every *available* signal of `{before, after, structural}` agrees (when none are stored this is vacuous → the fuzzy threshold alone decides), else orphan. On accept, **repair**: rewrite the blockquote to the matched *source* bytes, refresh context, recompute `qhash` — so it resolves exact next time. A repair is never marked `unique`; the next load promotes it. |
+
+After any successful exact anchor, set `status` to `unique`/`exact` by the current body-wide exact-candidate count, and persist. A stale `unique` is safe: it can only *demote* a match into the context check, never promote a wrong spot.
+
+**Frontmatter is excluded from the search space.** A leading YAML frontmatter block is metadata, never annotatable body text — yet its `title`/`description` routinely *duplicate* body text (a web clip's H1 **is** the page title; the `description` repeats the lede). Counting it as part of the document let a body highlight anchor **into** the frontmatter, where Live Preview renders it as the Properties widget (no text a CM6 decoration can land on → it silently vanishes) while reading mode's best-effort painter found the body copy instead — a confusing mode-split where the same highlight shows in reading mode but not Live Preview. So every content matcher — the resolver, highlight **creation** (the `unique` vs `exact` birth count), the reading-mode locator, and the import locator — starts at the body offset (`src/text/frontmatter.ts#bodyStart`, pure). This also corrects the *birth* status: a quote the title duplicates is born `unique` (one body occurrence), so it takes the cheap path forever instead of being permanently dragged into the context check by a phantom frontmatter "duplicate". The recovery row above heals records already mis-stamped under the old whole-document count.
+
+**In-session (as built).** Editing the source autosaves, which reloads the store and runs the procedure above — so most in-session edits self-heal through the **load path**: a benign in-quote edit or an *addition* fuzzy-repairs on the next autosave (the fuzzy end-refinement *extends* correctly to cover lengthened text), surrounding edits are tolerated, and a one-shot deletion / wholesale replace leaves no partial so it orphans carrying the original. The live CM6 decoration (`RangeSet.map`) keeps the highlight painted meanwhile.
+
+The **deletion** path needs more than the load path, because fuzzy resolution *overshoots a shortened passage*: matching `the quick brown fox` against `the quick brown jumped…` scores a window ending in `…brown jum` (trailing substitutions) above the true survivor `…brown` (tail deletions), so a load-path repair would capture garbage or orphan. The fix: commit the deletion survivor from the editor's **exact** live range, never fuzzy.
+
+**Consecutive-deletion run (delete-by-word).** A CM6 view plugin (`src/editor/self-heal.ts`) classifies each transaction's effect on every painted highlight and runs a per-highlight **deletion-run** state machine. While successive **contiguous deletions eat into one highlight**, it flags that id *suppressed* in the store: `resolveAll` leaves the record untouched (original held, nothing written) **and the store stops repainting it**, so its live CM decoration keeps the clean, exactly-mapped survivor range. The run is **per-highlight**; unrelated edits elsewhere never disturb it. On run end the plugin reads that live range and:
+
+- **full collapse** (highlight gone from the decoration, or a fully-contains change) → orphan via the load path, carrying the **original** quote (so the aside shows what was actually highlighted);
+- **a 15 s settle timer** — each deletion (re)starts it, a further deletion **resets** it; on elapse → **commit the survivor** from the editor's exact `[from, to)` (`store.commitSurvivor`: write the precise quote + context, then re-resolve — it now matches *exact*). The editor **losing focus** settles every active run at once (the user moved on);
+- **an insertion / non-deletion edit into the highlight region** → ends the run **immediately** → commit the survivor likewise (a deliberate trim, e.g. dropping "fox", is a legitimate new highlight).
+
+**Undo/redo during a run** is special-cased: a re-inserted edge does **not** re-grow an exclusive `Decoration.mark`, so after an undo the live decoration is stale (shrunk) even though the text is restored — committing from it would wrongly keep the highlight shrunk. So the plugin detects an `undo`/`redo` user-event, **abandons** the active runs (`tracker.cancelAll`, no commit), and re-anchors each by **content** against the live text (`store.recheckRun`): the held original quote re-matches a full undo *exactly* (no fuzzy), restoring the highlight; the durable persist follows on the next autosave reload.
+
+Nothing is written during a run, so a crash mid-deletion leaves the original to be re-resolved on reload. The bug-prone parts — edit classification, the run/timer machine, and the live-range lookup — are pure and unit-tested (`src/editor/self-heal.test.ts`); only the view-plugin shell, `commitSurvivor`/`recheckRun`, and the suppression set are runtime.
+
+**Context / heading refresh (as built).** When a highlight anchors via *context* or *fuzzy* — i.e. its disambiguating signals actually did work — `resolveAll` re-captures `before`/`after` from the resolved range and re-derives `pin`/`heading` from the metadata cache, persisting any change. This recovers a signal that has drifted from nearby edits *before* cumulative drift can starve an ambiguous highlight of evidence. A plain *unique* exact hit never consults these signals, so it is left untouched (no write churn); structural fields update only when re-derivable, never cleared on a transient cache miss; and a highlight in an active deletion run is held (above). A heading edit *inside* the quote (heading-spanning, §6.4) is content, handled by the fuzzy repair, not this path.
+
+**In-session vs. out-of-session.** The edit log is the CM6 transaction's `ChangeSet` and exists **only while the file is open**; it supplies the precise, observed mapping that lets the in-session path skip context confirmation (except the fully-contains guard). Edits by another app / Sync / git / while closed produce no transaction and are caught on **first load** by the resolver, which *must* confirm via before/after/heading because nothing observed the move. Both paths converge on the same `status` verdict.
+
+**Write discipline.** The in-memory record updates live; **disk writes are debounced** (no per-keystroke churn, and it sidesteps the strict-write refusal and read-modify-write races, §10 #11). Load-time repairs batch into a single write and only when bytes actually changed — note this means *opening* an externally-edited note can rewrite its sidecar, the accepted cost of self-healing.
 
 ---
 

@@ -81,6 +81,19 @@ export default class MarginaliaPlugin extends Plugin implements SettingsHost {
         onActiveHighlightsChange: (ids) => {
           if (ids.length > 0) this.getAside()?.pulseCard(ids[0]);
         },
+        // In-session self-heal (§6.5): hold a highlight's repair while it is being
+        // deleted word-by-word, then on run end commit the survivor from the
+        // editor's exact range (settle/edit) or orphan with the original (collapse).
+        onDeletionRunStart: (id) => {
+          const f = this.activeSourceFile();
+          if (f) this.store.suppressRepair(f.path, id);
+        },
+        // Commit/collapse resolve the source from the suppression map (where the
+        // run started), so a run that ends after switching notes still targets it.
+        onDeletionRunCommit: (id, from, to, docText) =>
+          void this.store.commitSurvivor(id, docText, from, to),
+        onDeletionRunCollapse: (id) => this.store.releaseRepair(id),
+        onDeletionRunRecheck: (id, docText) => this.store.recheckRun(id, docText),
       }),
     );
 
@@ -281,6 +294,15 @@ export default class MarginaliaPlugin extends Plugin implements SettingsHost {
     } else {
       this.getAside()?.setSourceFile(null);
     }
+  }
+
+  /** The source `TFile` behind the active editor (resolving a sidecar to its source). */
+  private activeSourceFile(): TFile | null {
+    const active = this.app.workspace.getActiveFile();
+    if (!active) return null;
+    const sourcePath = this.resolveSourcePath(active.path);
+    const f = this.app.vault.getAbstractFileByPath(sourcePath);
+    return f instanceof TFile ? f : null;
   }
 
   /** Reload when the active source — or its sidecar — changes underneath us. */

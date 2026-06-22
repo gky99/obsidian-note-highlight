@@ -94,6 +94,22 @@ When adding a module, decide its zone first. If it can be pure, make it pure.
 - **Orphan, never mis-point.** If the resolver can't find a passage confidently it
   returns `orphaned`; the plugin refuses to jump rather than scroll to a wrong spot.
   The resolver also orphans on *ambiguous duplicate* matches instead of fuzzy-guessing.
+- **Self-healing: the stored selector is kept equal to the live bytes (§6.5).** `status`
+  is the persisted confidence `unique | exact | orphan` (NOT the old `anchored|orphaned`;
+  legacy migrates on read, `store.suppressRepair`-style holds aside). `unique` gates a
+  cheap re-anchor; fuzzy is a *repair trigger* (rewrite the quote to the matched bytes),
+  not a resting state. The resolver searches the **whole body** normalized projection — pin/
+  heading are a *confirmation signal*, not a search-space restriction — so don't reintroduce
+  block-scoping as a correctness mechanism (it's only a perf option).
+- **Frontmatter is excluded from every content matcher (§6.5).** A leading YAML block is
+  metadata, never an annotation target, but its `title`/`description` duplicate body text
+  (a clip's H1 *is* the page title) — so a whole-file search anchored a body highlight *into*
+  the frontmatter, where Live Preview can't paint it (Properties widget) though reading mode's
+  best-effort painter found the body copy: a highlight that shows in reading mode but not Live
+  Preview. The resolver, creation (`unique` vs `exact` birth count), reading-mode locate
+  (`text/locate`), and import locate (`import/locate`) all start at `text/frontmatter#bodyStart`
+  (pure). A record mis-stamped `exact` by the old whole-file count whose quote also sits in the
+  frontmatter is healed by a recovery branch: sole body match → anchor + promote to `unique`.
 - **Normalize whitespace everywhere.** Matching runs on a whitespace-collapsed
   projection with an index map back to true offsets — the #1 survival mechanism for
   re-clips. Markdown markers (`##`, `**`) are preserved, never stemmed.
@@ -359,12 +375,65 @@ clobber). Safer than the old behavior but a real UX wart. Option if it bites: ha
 write path preserve unparseable units verbatim (round-trip their raw text) instead of
 refusing.
 
+### Self-healing references — DONE (Design.md §6.5, 2026-06-21)
+The stored selector is now actively kept equal to the live source bytes instead of resting
+in fuzzy/orphan. Built in 5 slices (all committed on this branch; 261 unit tests):
+- **Status enum** `unique | exact | orphan` (`model/types.ts`); `sidecar/parse.ts` migrates
+  legacy `anchored→exact`/`orphaned→orphan` on read and normalizes in place.
+- **Resolver** (`resolver/resolve.ts`, rewritten): whole-document search; cheap path
+  (globally-unique + prior `unique`); context tiers `{before, after, structural}` — exact
+  full-window, all-three→≥2, **first-wins** on tie; fuzzy gated by the same signals →
+  reports `confidence` + drives a repair. Pure, 35 tests.
+- **Store load path** (`store.ts`): `resolveAll` folds confidence→status, fuzzy→repairs the
+  quote, and refreshes context/heading on context/fuzzy anchors; `persistRepairs` writes the
+  changed records once, **strict** (refuses on a malformed neighbor, never clobbers).
+  Fresh highlights are born `unique` when their quote is sole.
+- **In-session delete-by-word guard** (`editor/self-heal.ts`, pure + 15 tests): a CM6 view
+  plugin classifies each transaction per highlight and runs a 15 s deletion-run state
+  machine; while a run is active it `store.suppressRepair`s the id so the load path holds the
+  **original** quote, releasing (settle/edit→commit survivor, collapse→orphan-with-original)
+  on run end. Recapture + fully-contains are handled by the load path, not the editor.
+
+Key behavior: in-session edits self-heal via autosave→reload→`resolveAll`; the editor guard
+only exists to stop a *paused* delete-by-word from repairing to a fragment. Opening an
+externally-edited note can rewrite its sidecar (accepted cost). The run's source file is
+resolved from the **suppression map** (where the run started), *not* the active file — a
+blur/timer settle can fire after the user switched notes. Open follow-ups: (1) the strict
+write means a malformed unit blocks repair persistence for the whole sidecar (above); (2) an
+**undo *after* the 15 s settle already committed the survivor** is *not* re-expanded — once
+settled, the shrink is a finished edit, so undoing the text won't re-grow the stored quote
+(would need tracking recently-committed runs past their settle; user did not request it).
+
+### Frontmatter anchoring — RESOLVED (2026-06-22)
+The "whole-document" search (above) literally meant the whole file, **including the YAML
+frontmatter**. A web clip's `title`/`description` duplicate body text (the clip's H1 *is*
+the page title), so a body highlight could anchor *into* the frontmatter — invisible in
+Live Preview (the Properties widget has no text a CM6 decoration lands on) yet painted by
+reading mode's best-effort painter on the body copy: the same highlight showing in reading
+mode but not Live Preview. **Learning: "whole document" must mean the whole *body*** — a
+content matcher must never treat frontmatter as annotatable text. Fixed by bounding every
+matcher (resolver, creation birth-count, both locators) at `src/text/frontmatter.ts#bodyStart`
+(pure), plus a §6.5 recovery branch that heals records the old count already mis-stamped
+`exact` (sole body match whose quote also sits in the frontmatter → anchor + promote to
+`unique`). The §6.5-A conservative orphan is preserved (gated on the frontmatter twin).
+Verified by `src/text/frontmatter.test.ts`, 4 cases in `resolver/resolve.test.ts`, and the
+`frontmatter-anchor.e2e.ts` e2e on real Obsidian (neutralize→fail→restore→pass).
+
 ## Status / next step
 
 Core is done and tested. The runtime layers build and typecheck; the selection toolbar,
 custom palette, custom save location, and aside card controls are in. Recent work, newest
 first:
 
+- **Frontmatter excluded from anchoring** (Design.md §6.5). A web clip's YAML `title`
+  duplicates its H1, so the whole-file search anchored that H1 highlight *into* the
+  frontmatter — invisible in Live Preview (Properties widget), yet reading mode's painter
+  found the body copy (the reported mode-split). New pure `src/text/frontmatter.ts#bodyStart`
+  now bounds the resolver, the creation `unique`/`exact` birth count, and both locators
+  (`text/locate`, `import/locate`). A resolver recovery branch heals records already
+  mis-stamped `exact`: a sole body match whose quote also sits in the frontmatter anchors and
+  promotes to `unique`. Tests: `src/text/frontmatter.test.ts` + 4 in `resolver/resolve.test.ts`
+  (neutralize→fail→restore verified).
 - **Import preview: show un-located marks + fix default focus** (Design.md §15.4). The preview
   now displays marks it couldn't re-anchor (a "Not located" section / per-clip inline list,
   flag beside the quote) instead of only counting them — shown, never written. And **Import is
@@ -394,6 +463,11 @@ first:
 - Sidecar format rework (`[/]:#` terminator, fault-isolated parsing, end-of-file id-bound
   `anno` blocks, short base36 ids).
 
-Open items: the strict-write tradeoff (above); a continue/share collision choice may re-prompt
-across sessions (not persisted); in-vault verification of the import and the collision flow;
-the card-alignment stretch goal via `coordsAtPos` (§7.3).
+Open items: the strict-write tradeoff (above); the undo-after-settle edge (above); a
+continue/share collision choice may re-prompt across sessions (not persisted); in-vault
+verification of the import and the collision flow; the card-alignment stretch goal via
+`coordsAtPos` (§7.3). **Merge:** this branch (`self-healing-refs`) and `frontmatter-wikilink-
+annotates` both rewrite the sidecar format (`sidecar/parse.ts` + the YAML/frontmatter helpers
+and the `status`/`schema` fields) — whichever lands second will need a manual conflict
+resolution there; reconcile the status-enum migration with the `annotation_schema`/wikilink
+`annotates` change rather than taking one side wholesale.

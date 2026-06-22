@@ -57,7 +57,7 @@ heading: Article
 before: "paragraph mentioning "
 after: " right here."
 qhash: deadbeef
-status: anchored
+status: exact
 color: yellow
 comment: true
 ${F}
@@ -68,7 +68,7 @@ heading: A quoted heading
 before: "A lead-in line. "
 after: " and more."
 qhash: cafebabe
-status: anchored
+status: exact
 color: green
 comment: true
 ${F}
@@ -77,7 +77,7 @@ ${F}anno
 id: 01J8XZ
 heading: Methods
 qhash: 00000000
-status: anchored
+status: exact
 color: blue
 comment: true
 ${F}

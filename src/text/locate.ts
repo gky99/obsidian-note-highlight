@@ -16,6 +16,7 @@
  */
 import type { Range } from '@/model/types';
 import { projectQuoteToText } from '@/reading/project';
+import { bodyStart } from '@/text/frontmatter';
 
 interface Cell {
   ch: string;
@@ -60,12 +61,16 @@ export function findSourceRange(sourceText: string, selected: string): Range | n
   const needle = projectQuoteToText(selected);
   if (needle.length === 0) return null;
 
-  const proj = projectSourceWithMap(sourceText);
+  // Search only the body: a leading YAML frontmatter block isn't annotatable, and
+  // its title/description duplicate body text, so the first occurrence could
+  // otherwise land in the frontmatter (Design.md §6.5). `base` maps offsets home.
+  const base = bodyStart(sourceText);
+  const proj = projectSourceWithMap(sourceText.slice(base));
   const i = proj.text.indexOf(needle);
   if (i === -1) return null;
 
-  const from = proj.off[i];
-  const to = proj.off[i + needle.length - 1] + 1;
+  const from = base + proj.off[i];
+  const to = base + proj.off[i + needle.length - 1] + 1;
   return { from, to };
 }
 
