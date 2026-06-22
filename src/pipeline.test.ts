@@ -26,8 +26,8 @@ followed by text with **strong** emphasis and more.
 const F = '```';
 
 const SIDECAR = `---
-schema: webclip-annotations/1
-annotates: Article.md
+annotation_schema: 1
+annotates: "[[Article]]"
 source_url: "https://example.com/article"
 clipped: 2026-06-19
 ---
@@ -88,7 +88,7 @@ describe('core pipeline (sidecar → resolve → serialize)', () => {
   const structure = inMemoryStructure({}); // all scopes null → whole document
 
   it('parses every annotation unit', () => {
-    expect(sidecar.frontmatter.annotates).toBe('Article.md');
+    expect(sidecar.frontmatter.annotates).toBe('[[Article]]');
     expect(sidecar.annotations.map((a) => a.id)).toEqual(['01J8X2', '01J8X9', '01J8XZ']);
   });
 

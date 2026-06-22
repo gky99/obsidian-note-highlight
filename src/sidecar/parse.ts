@@ -96,15 +96,15 @@ function splitFrontmatter(text: string): FrontmatterSplit {
     throw new SidecarParseError(`Invalid frontmatter YAML: ${(err as Error).message}`);
   }
 
-  const schema = raw['schema'];
-  if (typeof schema !== 'string' || schema !== SCHEMA_VERSION) {
+  const version = raw['annotation_schema'];
+  if (version !== SCHEMA_VERSION) {
     throw new SidecarSchemaError(
-      typeof schema === 'string' ? schema : undefined,
+      typeof version === 'number' ? version : undefined,
       SCHEMA_VERSION,
     );
   }
   if (typeof raw['annotates'] !== 'string') {
-    throw new SidecarParseError('Frontmatter is missing a string "annotates" path.');
+    throw new SidecarParseError('Frontmatter is missing a string "annotates" link.');
   }
 
   return {

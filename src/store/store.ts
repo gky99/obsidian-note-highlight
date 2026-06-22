@@ -24,7 +24,8 @@ import {
   findEnclosingBlockId,
   findEnclosingHeadingPath,
 } from '@/obsidian/metadata';
-import { sidecarPathForSource } from '@/obsidian/sidecar-path';
+import { annotatesLink, resolveAnnotates, sidecarPathForSource } from '@/obsidian/sidecar-path';
+import { mergeResolved, pickPrimary } from './merge';
 import { normalize, normalizeQuote, quoteHash } from '@/text/normalize';
 import { bodyStart } from '@/text/frontmatter';
 import { contentHash } from '@/text/hash';
@@ -45,6 +46,8 @@ function shortId(length = 6): string {
 export interface ResolvedAnnotation {
   annotation: Annotation;
   result: ResolveResult;
+  /** The annotation file this record came from (a clip may have several — §4.1). */
+  sidecarPath: string;
 }
 
 /** A highlight to create in a batch (Web Highlights import): a range + presentation. */
@@ -56,9 +59,11 @@ export interface NewHighlight {
 }
 
 interface SourceEntry {
-  sidecarPath: string;
-  sidecar: Sidecar;
+  /** Every annotation file whose `annotates` resolves to this source (§4.1). */
+  sidecars: { path: string; sidecar: Sidecar }[];
   resolved: ResolvedAnnotation[];
+  /** The file that wins overlaps and receives new highlights (see {@link pickPrimary}). */
+  primaryPath: string;
 }
 
 type ChangeListener = (sourcePath: string) => void;
@@ -138,20 +143,17 @@ export class AnnotationStore {
   }
 
   /**
-   * Probe numbered sidecar slots `-1, -2, …` for this source. Returns the slot we
-   * *own* (its `annotates` matches), if any, plus the first *free* slot to claim.
-   * Stops at the first empty slot — safe because the plugin never auto-deletes a
-   * sidecar file (emptied ones persist), so a numbered cluster has no gaps.
+   * The first *free* numbered sidecar slot `-1, -2, …` for this source (folder mode).
+   * Stops at the first path with no file — safe because the plugin never auto-deletes a
+   * sidecar (emptied ones persist), so a numbered cluster has no gaps.
    */
-  private probeSuffixed(sourcePath: string): { owned: TFile | null; firstFree: string } {
+  private firstFreePath(sourcePath: string): string {
     const MAX = 1000; // runaway guard; real clusters are tiny
     for (let n = 1; n <= MAX; n++) {
       const path = this.suffixedPath(sourcePath, n);
-      const file = this.fileAt(path);
-      if (!file) return { owned: null, firstFree: path };
-      if (this.annotatesOf(file) === sourcePath) return { owned: file, firstFree: path };
+      if (!this.fileAt(path)) return path;
     }
-    return { owned: null, firstFree: this.suffixedPath(sourcePath, MAX) };
+    return this.suffixedPath(sourcePath, MAX);
   }
 
   /** True when a custom sidecar folder is configured (the only place collisions arise). */
@@ -164,10 +166,15 @@ export class AnnotationStore {
     return f instanceof TFile ? f : null;
   }
 
-  /** The source a sidecar declares it annotates (from cached frontmatter), if any. */
+  /**
+   * The source a sidecar declares it annotates, as a concrete vault path. The stored
+   * `annotates` is a wikilink, so resolve it through the metadata cache (relative to the
+   * sidecar) — this is what keeps ownership matching correct after Obsidian rewrites the
+   * link on a source move/rename.
+   */
   private annotatesOf(file: TFile): string | null {
     const a = this.app.metadataCache.getFileCache(file)?.frontmatter?.annotates;
-    return typeof a === 'string' && a ? a : null;
+    return typeof a === 'string' && a ? resolveAnnotates(this.app.metadataCache, file.path, a) : null;
   }
 
   private bind(sourcePath: string, file: TFile): TFile {
@@ -176,34 +183,49 @@ export class AnnotationStore {
   }
 
   /**
-   * Locate the sidecar file holding `sourcePath`'s annotations. In a flat sidecar
-   * folder two same-named notes can collide on the canonical name, so the lookup
-   * is ownership-aware: prefer our own canonical sidecar, then our own numbered
-   * one (found by probing slots and matching `annotates`), and only then fall back
-   * to a *shared* canonical (the "Continue" outcome / a same-named note that never
-   * opted out). The shared fallback is intentionally not bound, so a first write
-   * to it still prompts.
+   * Every annotation file that belongs to `sourcePath`, identified **by `annotates`**
+   * (§4.1) — location- and name-independent, so a moved/renamed file is still found.
+   *
+   * Two passes: (1) the authoritative set — every markdown file whose `annotates`
+   * resolves to the source, wherever it lives; (2) a metadataCache-lag fast path — the
+   * name-convention locations (canonical + numbered slots) and the sticky binding,
+   * which is where the plugin *creates* sidecars. A just-created file's `annotates` is
+   * not indexed for a moment, so pass (1) misses it; pass (2) accepts such a file when
+   * its `annotates` is not yet resolvable (`null`). A file whose `annotates` clearly
+   * resolves *elsewhere* (a collision sibling, or a "Continue" override that repointed
+   * it) is left out — identity-by-link wins once the cache is warm.
    */
-  private sidecarFileFor(sourcePath: string): TFile | null {
+  private sidecarsFor(sourcePath: string): TFile[] {
+    const out = new Map<string, TFile>();
+    for (const f of this.app.vault.getMarkdownFiles()) {
+      if (this.annotatesOf(f) === sourcePath) out.set(f.path, f);
+    }
+
+    const accept = (f: TFile | null): void => {
+      if (f && !out.has(f.path) && this.annotatesOf(f) === null) out.set(f.path, f);
+    };
+    accept(this.fileAt(this.sidecarPathFor(sourcePath)));
+    if (this.folderMode()) {
+      const MAX = 1000; // runaway guard; real clusters are tiny
+      for (let n = 1; n <= MAX; n++) {
+        const f = this.fileAt(this.suffixedPath(sourcePath, n));
+        if (!f) break;
+        accept(f);
+      }
+    }
     const bound = this.resolvedSidecar.get(sourcePath);
     if (bound) {
       const f = this.fileAt(bound);
-      if (f) return f;
-      this.resolvedSidecar.delete(sourcePath);
+      if (f) accept(f);
+      else this.resolvedSidecar.delete(sourcePath);
     }
 
-    const canonical = this.fileAt(this.sidecarPathFor(sourcePath));
-    if (!this.folderMode()) return canonical ? this.bind(sourcePath, canonical) : null;
-
-    if (canonical && this.annotatesOf(canonical) === sourcePath) return this.bind(sourcePath, canonical);
-    const { owned } = this.probeSuffixed(sourcePath);
-    if (owned) return this.bind(sourcePath, owned); // our own numbered sidecar
-    return canonical; // shared fallback (unbound) or null
+    return [...out.values()];
   }
 
-  /** Does a sidecar file exist for this source (by naming convention)? */
+  /** Does at least one annotation file exist for this source? */
   hasSidecar(sourcePath: string): boolean {
-    return this.sidecarFileFor(sourcePath) !== null;
+    return this.sidecarsFor(sourcePath).length > 0;
   }
 
   /** Currently-loaded resolved annotations for a source (empty if not loaded). */
@@ -305,7 +327,8 @@ export class AnnotationStore {
     const before = contextBefore(docText, from, n);
     const after = contextAfter(docText, to, n);
     const qhash = quoteHash(quote);
-    const sidecarPath = this.entries.get(sourceFile.path)?.sidecarPath;
+    // Commit into whichever of the clip's annotation files holds this id (§4.1).
+    const sidecarPath = this.getById(sourceFile.path, id)?.sidecarPath;
     const file = sidecarPath ? this.fileAt(sidecarPath) : null;
     if (file) {
       try {
@@ -360,79 +383,99 @@ export class AnnotationStore {
    * notifies subscribers.
    */
   async load(sourceFile: TFile): Promise<ResolvedAnnotation[]> {
-    const sidecarFile = this.sidecarFileFor(sourceFile.path);
-    if (!sidecarFile) {
+    const files = this.sidecarsFor(sourceFile.path);
+    if (files.length === 0) {
       this.forget(sourceFile.path);
       return [];
-    }
-
-    let sidecar: Sidecar;
-    const issues: ParseIssue[] = [];
-    try {
-      // Read path: tolerant — a malformed unit is skipped and collected, never
-      // blanking the rest of the file's rendering. Only fatal frontmatter/schema
-      // problems throw and land below.
-      sidecar = parseSidecar(await this.app.vault.cachedRead(sidecarFile), (i) => issues.push(i));
-    } catch (e) {
-      const why =
-        e instanceof SidecarSchemaError
-          ? `unsupported schema (${e.found ?? 'none'})`
-          : 'could not be parsed';
-      new Notice(`Marginalia: sidecar ${sidecarFile.path} ${why}.`);
-      this.forget(sourceFile.path);
-      return [];
-    }
-    if (issues.length > 0) {
-      const n = issues.length;
-      new Notice(
-        `Marginalia: skipped ${n} malformed annotation${n > 1 ? 's' : ''} in ${sidecarFile.path}.`,
-      );
     }
 
     const sourceText = await this.app.vault.cachedRead(sourceFile);
-    const { resolved, changed } = this.resolveAll(sourceFile, sourceText, sidecar);
-    this.entries.set(sourceFile.path, { sidecarPath: sidecarFile.path, sidecar, resolved });
+    // Parse + resolve every annotation file independently and tolerantly: a malformed
+    // unit is skipped (collected), and a whole unparseable/schema-bad file is dropped
+    // with a Notice — neither blanks the rest of the clip's other files (§4.1).
+    const sidecars: { path: string; sidecar: Sidecar }[] = [];
+    const perFile: { sidecarPath: string; resolved: ResolvedAnnotation[] }[] = [];
+    const repairs: { file: TFile; changed: Set<string> }[] = [];
+    for (const file of files) {
+      const issues: ParseIssue[] = [];
+      let sidecar: Sidecar;
+      try {
+        sidecar = parseSidecar(await this.app.vault.cachedRead(file), (i) => issues.push(i));
+      } catch (e) {
+        const why =
+          e instanceof SidecarSchemaError
+            ? `unsupported annotation_schema (${e.found ?? 'none'})`
+            : 'could not be parsed';
+        new Notice(`Marginalia: sidecar ${file.path} ${why}.`);
+        continue;
+      }
+      if (issues.length > 0) {
+        const n = issues.length;
+        new Notice(
+          `Marginalia: skipped ${n} malformed annotation${n > 1 ? 's' : ''} in ${file.path}.`,
+        );
+      }
+      const { resolved, changed } = this.resolveAll(sourceFile, sourceText, sidecar, file.path);
+      sidecars.push({ path: file.path, sidecar });
+      perFile.push({ sidecarPath: file.path, resolved });
+      if (changed.size > 0) repairs.push({ file, changed });
+    }
+
+    if (sidecars.length === 0) {
+      this.forget(sourceFile.path);
+      return [];
+    }
+
+    const primaryPath = pickPrimary(
+      sidecars.map((s) => ({ path: s.path, mtime: this.fileAt(s.path)?.stat.mtime ?? 0 })),
+      this.sidecarPathFor(sourceFile.path),
+      this.resolvedSidecar.get(sourceFile.path),
+    );
+    const resolved = mergeResolved(perFile, primaryPath);
+    this.entries.set(sourceFile.path, { sidecars, resolved, primaryPath });
+    this.resolvedSidecar.set(sourceFile.path, primaryPath);
     // Don't repaint while a deletion run is active: the held resolution is a fuzzy
     // (over-extended) match, and repainting from it would corrupt the live CM
     // decoration the editor reads to commit the survivor. The CM mapping keeps the
     // decoration clean on its own meanwhile (§6.5).
     if (!this.suppressed.has(sourceFile.path)) this.emit(sourceFile.path);
-    // Self-heal: persist repairs / status promotions once, best-effort and never
-    // clobbering (§6.5). Fire-and-forget — the in-memory state is already live, so
-    // rendering/navigation don't wait on the write.
-    if (changed.size > 0) void this.persistRepairs(sourceFile, sidecarFile, changed);
+    // Self-heal: persist each file's repairs / status promotions once, best-effort
+    // and never clobbering (§6.5). Fire-and-forget — the in-memory state is live.
+    for (const { file, changed } of repairs) void this.persistRepairs(sourceFile, file, changed);
     return resolved;
   }
 
   /**
    * Write back the §6.5 self-healing changes (repaired quote, refreshed context,
-   * status promotion/orphan) for `changed` ids, batched into one atomic write.
-   * Reads the new values from the live in-memory entry and applies them by id to
-   * the freshly-parsed on-disk sidecar. Strict by construction (via {@link rmw}):
-   * if another unit on disk is malformed the write refuses rather than clobber it
-   * (§10 #11); the in-memory repair still holds for the session. Best-effort —
-   * never throws into the load path.
+   * status promotion/orphan) for `changed` ids in one of the clip's sidecars,
+   * batched into one atomic write. Reads the new values from that file's live
+   * in-memory annotations and applies them by id to the freshly-parsed on-disk
+   * sidecar. Strict by construction (via {@link rmw}): if another unit on disk is
+   * malformed the write refuses rather than clobber it (§10 #11); the in-memory
+   * repair still holds for the session. Best-effort — never throws into load.
    */
   private async persistRepairs(
     sourceFile: TFile,
     sidecarFile: TFile,
     changed: Set<string>,
   ): Promise<void> {
-    const entry = this.entries.get(sourceFile.path);
-    if (!entry) return;
+    const mem = this.entries
+      .get(sourceFile.path)
+      ?.sidecars.find((s) => s.path === sidecarFile.path)?.sidecar;
+    if (!mem) return;
     try {
       await this.rmw(sidecarFile, (disk) => {
         for (const diskAnno of disk.annotations) {
           if (!changed.has(diskAnno.id)) continue;
-          const mem = entry.sidecar.annotations.find((a) => a.id === diskAnno.id);
-          if (!mem) continue;
-          diskAnno.quote = mem.quote;
-          diskAnno.record.status = mem.record.status;
-          diskAnno.record.before = mem.record.before;
-          diskAnno.record.after = mem.record.after;
-          diskAnno.record.qhash = mem.record.qhash;
-          diskAnno.record.pin = mem.record.pin;
-          diskAnno.record.heading = mem.record.heading;
+          const memAnno = mem.annotations.find((a) => a.id === diskAnno.id);
+          if (!memAnno) continue;
+          diskAnno.quote = memAnno.quote;
+          diskAnno.record.status = memAnno.record.status;
+          diskAnno.record.before = memAnno.record.before;
+          diskAnno.record.after = memAnno.record.after;
+          diskAnno.record.qhash = memAnno.record.qhash;
+          diskAnno.record.pin = memAnno.record.pin;
+          diskAnno.record.heading = memAnno.record.heading;
         }
       });
     } catch {
@@ -452,6 +495,7 @@ export class AnnotationStore {
     sourceFile: TFile,
     sourceText: string,
     sidecar: Sidecar,
+    sidecarPath: string,
   ): { resolved: ResolvedAnnotation[]; changed: Set<string> } {
     const cache = this.app.metadataCache.getFileCache(sourceFile) ?? {};
     const structure = buildStructure(cache, sourceText.length);
@@ -468,7 +512,7 @@ export class AnnotationStore {
       // Held during an active in-session deletion run (§6.5): leave the record
       // entirely untouched (original quote + status) so a delete-by-word ends in
       // an orphan that still shows the original passage, not a fragment.
-      if (suppressed?.has(annotation.id)) return { annotation, result };
+      if (suppressed?.has(annotation.id)) return { annotation, result, sidecarPath };
       const r = annotation.record;
       const before = JSON.stringify([r.status, annotation.quote, r.before, r.after, r.pin, r.heading]);
 
@@ -503,17 +547,22 @@ export class AnnotationStore {
       if (JSON.stringify([r.status, annotation.quote, r.before, r.after, r.pin, r.heading]) !== before) {
         changed.add(annotation.id);
       }
-      return { annotation, result };
+      return { annotation, result, sidecarPath };
     });
 
     return { resolved, changed };
   }
 
-  /** A short id not already used by this source's loaded annotations. */
-  private freshId(sourcePath: string): string {
-    const taken = new Set(
-      this.entries.get(sourcePath)?.sidecar.annotations.map((a) => a.id) ?? [],
+  /** Ids used by any of this source's loaded annotation files (the union — §4.1). */
+  private takenIds(sourcePath: string): Set<string> {
+    return new Set(
+      this.entries.get(sourcePath)?.sidecars.flatMap((s) => s.sidecar.annotations.map((a) => a.id)) ?? [],
     );
+  }
+
+  /** A short id not already used by any of this source's loaded annotations. */
+  private freshId(sourcePath: string): string {
+    const taken = this.takenIds(sourcePath);
     let id = shortId();
     while (taken.has(id)) id = shortId();
     return id;
@@ -578,9 +627,7 @@ export class AnnotationStore {
     const sourceText = await this.app.vault.cachedRead(sourceFile);
     const cache = this.app.metadataCache.getFileCache(sourceFile) ?? {};
 
-    const taken = new Set(
-      this.entries.get(sourceFile.path)?.sidecar.annotations.map((a) => a.id) ?? [],
-    );
+    const taken = this.takenIds(sourceFile.path);
     const accepted: { from: number; to: number }[] = [];
     const created: Annotation[] = [];
     for (const item of items) {
@@ -666,13 +713,13 @@ export class AnnotationStore {
 
   private newFrontmatter(sourcePath: string, sourceText: string): SidecarFrontmatter {
     const fm: SidecarFrontmatter = {
-      schema: SCHEMA_VERSION,
-      annotates: sourcePath,
+      annotation_schema: SCHEMA_VERSION,
+      annotates: annotatesLink(sourcePath),
       source_hash: contentHash(sourceText),
     };
     // User-configured fields, added to every annotation file as it's created
     // (both manual highlighting and import). Reserved keys can't be overridden.
-    const reserved = new Set(['schema', 'annotates', 'source_hash']);
+    const reserved = new Set(['annotation_schema', 'annotates', 'source_hash']);
     for (const { key, value } of this.settings.sidecarFrontmatter ?? []) {
       const k = key.trim();
       if (k && !reserved.has(k)) fm[k] = value;
@@ -706,11 +753,14 @@ export class AnnotationStore {
   }
 
   /**
-   * Write a source's sidecar, creating it if absent (§9). Resolves a flat-folder
-   * basename collision via {@link onCollision}: when this source has no sidecar
-   * yet and the canonical name is already owned by a *different* note, the user
-   * chooses to share that file (`continue`), save to a disambiguated name
-   * (`suffix`), or abort (`cancel`). Returns `false` only on cancel.
+   * Write a source's annotations, creating the first file if none exists yet (§9, §4.1).
+   * A clip's files are identified by `annotates`, so when one or more already exist the
+   * write goes to the {@link pickPrimary} primary — wherever it lives. Only when *none*
+   * exists do we create one at the configured location, and only there can a flat-folder
+   * basename clash with a **different** clip arise; {@link onCollision} resolves it:
+   * `suffix` (a fresh numbered file), `continue` (take over the existing file for this
+   * clip — override its `annotates`/`source_hash`, keeping its annotations), or `cancel`.
+   * Returns `false` only on cancel.
    */
   private async writeSidecar(
     sourceFile: TFile,
@@ -719,19 +769,27 @@ export class AnnotationStore {
   ): Promise<boolean> {
     const source = sourceFile.path;
     try {
-      // A committed binding (own sidecar / prior choice) → write straight through.
-      const bound = this.resolvedSidecar.get(source);
-      const boundFile = bound ? this.fileAt(bound) : null;
-      if (boundFile) {
-        await this.rmw(boundFile, mutate);
-        return true;
+      // Existing annotation file(s) for this clip → write to the primary.
+      const existing = this.sidecarsFor(source);
+      if (existing.length > 0) {
+        const primary = pickPrimary(
+          existing.map((f) => ({ path: f.path, mtime: f.stat.mtime })),
+          this.sidecarPathFor(source),
+          this.resolvedSidecar.get(source),
+        );
+        const file = this.fileAt(primary);
+        if (file) {
+          await this.rmw(file, mutate);
+          this.bind(source, file);
+          return true;
+        }
       }
 
       const canonical = this.sidecarPathFor(source);
       const canonicalFile = this.fileAt(canonical);
 
-      // Alongside mode: the canonical name embeds the full source path → unique,
-      // so it is always ours; never a collision.
+      // Alongside mode: the canonical name embeds the full source path → unique, so it
+      // is always ours; never a collision. Adopt a stray file at the name if present.
       if (!this.folderMode()) {
         if (canonicalFile) await this.rmw(canonicalFile, mutate);
         else await this.createAt(canonical, source, sourceText, mutate);
@@ -739,43 +797,37 @@ export class AnnotationStore {
         return true;
       }
 
-      // Folder mode. Our own canonical sidecar?
-      if (canonicalFile && this.annotatesOf(canonicalFile) === source) {
-        await this.rmw(canonicalFile, mutate);
-        this.bind(source, canonicalFile);
-        return true;
-      }
-      // Our own numbered sidecar from a past collision (found by probing annotates)?
-      const { owned, firstFree } = this.probeSuffixed(source);
-      if (owned) {
-        await this.rmw(owned, mutate);
-        this.bind(source, owned);
-        return true;
-      }
-      // Canonical name taken by a different note → ask how to resolve the clash.
-      if (canonicalFile) {
-        const choice: CollisionChoice = this.onCollision
-          ? await this.onCollision({
-              sourcePath: source,
-              existingSidecarPath: canonical,
-              existingAnnotates: this.annotatesOf(canonicalFile),
-            })
-          : 'suffix';
-        if (choice === 'cancel') return false;
-        if (choice === 'suffix') {
-          await this.createAt(firstFree, source, sourceText, mutate);
-          this.resolvedSidecar.set(source, firstFree);
-          return true;
-        }
-        // 'continue' → share the existing sidecar.
-        await this.rmw(canonicalFile, mutate);
-        this.bind(source, canonicalFile);
+      // Folder mode, canonical name free → become its owner.
+      if (!canonicalFile) {
+        await this.createAt(canonical, source, sourceText, mutate);
+        this.resolvedSidecar.set(source, canonical);
         return true;
       }
 
-      // Canonical name is free → become its owner.
-      await this.createAt(canonical, source, sourceText, mutate);
-      this.resolvedSidecar.set(source, canonical);
+      // Folder mode, canonical name taken by a *different* clip (sidecarsFor found none
+      // for us) → ask how to resolve the filename clash.
+      const choice: CollisionChoice = this.onCollision
+        ? await this.onCollision({
+            sourcePath: source,
+            existingSidecarPath: canonical,
+            existingAnnotates: this.annotatesOf(canonicalFile),
+          })
+        : 'suffix';
+      if (choice === 'cancel') return false;
+      if (choice === 'suffix') {
+        const free = this.firstFreePath(source);
+        await this.createAt(free, source, sourceText, mutate);
+        this.resolvedSidecar.set(source, free);
+        return true;
+      }
+      // 'continue' → take over the existing file for this clip: override its link
+      // (detaching the previous clip) and keep its annotations, then append the new one.
+      await this.rmw(canonicalFile, (s) => {
+        s.frontmatter.annotates = annotatesLink(source);
+        s.frontmatter.source_hash = contentHash(sourceText);
+        mutate(s);
+      });
+      this.bind(source, canonicalFile);
       return true;
     } catch (e) {
       new Notice(`Marginalia: failed to write sidecar — ${String(e)}`);
@@ -806,7 +858,9 @@ export class AnnotationStore {
     fn: (a: Annotation, s: Sidecar) => void,
   ): Promise<void> {
     const sourceFile = this.app.vault.getAbstractFileByPath(sourcePath);
-    const sidecarFile = this.sidecarFileFor(sourcePath);
+    // Edit the file that actually holds this annotation (may be a non-primary one).
+    const resolved = this.getById(sourcePath, id);
+    const sidecarFile = resolved ? this.fileAt(resolved.sidecarPath) : null;
     if (!(sourceFile instanceof TFile) || !sidecarFile) return;
     try {
       await this.app.vault.process(sidecarFile, (text) => {

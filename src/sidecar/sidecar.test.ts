@@ -13,8 +13,8 @@ import { SidecarParseError, SidecarSchemaError } from './errors';
  * the invisible `[/]:#` terminator and the anno blocks note `comment: true`.
  */
 const EXAMPLE_52 = `---
-schema: webclip-annotations/1
-annotates: "Clips/The Article.md"
+annotation_schema: 1
+annotates: "[[Clips/The Article]]"
 source_url: "https://example.com/the-article"
 clipped: 2026-06-19
 source_hash: "sha1:ab12cd34ef…"
@@ -66,8 +66,8 @@ describe('parseSidecar — §5.2 worked example', () => {
 
   it('parses the frontmatter', () => {
     expect(sidecar.frontmatter).toEqual({
-      schema: SCHEMA_VERSION,
-      annotates: 'Clips/The Article.md',
+      annotation_schema: SCHEMA_VERSION,
+      annotates: '[[Clips/The Article]]',
       source_url: 'https://example.com/the-article',
       clipped: '2026-06-19',
       source_hash: 'sha1:ab12cd34ef…',
@@ -124,7 +124,7 @@ describe('parseSidecar — §5.2 worked example', () => {
 /** Build a minimal valid sidecar around a list of units, for focused tests. */
 function makeSidecar(annotations: Sidecar['annotations']): Sidecar {
   return {
-    frontmatter: { schema: SCHEMA_VERSION, annotates: 'Clips/Note.md' },
+    frontmatter: { annotation_schema: SCHEMA_VERSION, annotates: 'Clips/Note.md' },
     annotations,
   };
 }
@@ -153,7 +153,7 @@ describe('round-trip safety', () => {
   it('preserves unknown frontmatter and unknown anno keys', () => {
     roundTrips({
       frontmatter: {
-        schema: SCHEMA_VERSION,
+        annotation_schema: SCHEMA_VERSION,
         annotates: 'Clips/Note.md',
         source_url: 'https://x.test',
         custom_top: 'kept',
@@ -222,7 +222,7 @@ describe('round-trip safety', () => {
 describe('comment delimiting (§5.1 terminator + safeguards)', () => {
   it('keeps a thematic rule and a list inside a comment, ending at [/]:#', () => {
     const text = `---
-schema: webclip-annotations/1
+annotation_schema: 1
 annotates: "Clips/Note.md"
 ---
 
@@ -259,7 +259,7 @@ comment: true
 
   it('ends a comment at the next unit blockquote even without a [/]:# terminator', () => {
     const text = `---
-schema: webclip-annotations/1
+annotation_schema: 1
 annotates: "Clips/Note.md"
 ---
 
@@ -289,7 +289,7 @@ status: exact
 
   it('ends a comment at a fenced code block (safeguard)', () => {
     const text = `---
-schema: webclip-annotations/1
+annotation_schema: 1
 annotates: "Clips/Note.md"
 ---
 
@@ -315,7 +315,7 @@ comment: true
 
   it('binds a multi-line quote to its anno block by id', () => {
     const text = `---
-schema: webclip-annotations/1
+annotation_schema: 1
 annotates: "Clips/Note.md"
 ---
 
@@ -336,7 +336,7 @@ status: exact
 describe('anno block placement (id binding, not position)', () => {
   it('binds quotes to anno blocks collected at the end of the file, in any order', () => {
     const text = `---
-schema: webclip-annotations/1
+annotation_schema: 1
 annotates: "Clips/Note.md"
 ---
 
@@ -403,7 +403,7 @@ describe('comment presence flag + terminator (serialize)', () => {
 
   it('strips the derived comment flag from the parsed record', () => {
     const text = `---
-schema: webclip-annotations/1
+annotation_schema: 1
 annotates: "Clips/Note.md"
 ---
 
@@ -428,7 +428,7 @@ comment: true
 describe('quote / ref extraction', () => {
   it('parses the id from the ^anno-<id> ref and trims its whitespace', () => {
     const a = parseSidecar(`---
-schema: webclip-annotations/1
+annotation_schema: 1
 annotates: "Clips/Note.md"
 ---
 
@@ -448,7 +448,7 @@ c
     // The `^anno-<id>` ref is now the binding key: a quote whose ref points at no
     // anno block is an incomplete unit (skipped + reported, never mis-bound).
     const text = `---
-schema: webclip-annotations/1
+annotation_schema: 1
 annotates: "Clips/Note.md"
 ---
 
@@ -535,7 +535,7 @@ describe('fence collision (§4.4 / §10 #10)', () => {
 });
 
 describe('schema gate (§5.3)', () => {
-  it('throws SidecarSchemaError when schema is missing', () => {
+  it('throws SidecarSchemaError when annotation_schema is missing', () => {
     const text = `---
 annotates: "Clips/Note.md"
 ---
@@ -559,9 +559,9 @@ c
     }
   });
 
-  it('throws SidecarSchemaError when schema is an unsupported version', () => {
+  it('throws SidecarSchemaError when annotation_schema is an unsupported version', () => {
     const text = `---
-schema: webclip-annotations/2
+annotation_schema: 2
 annotates: "Clips/Note.md"
 ---
 
@@ -578,14 +578,14 @@ c
     try {
       parseSidecar(text);
     } catch (err) {
-      expect((err as SidecarSchemaError).found).toBe('webclip-annotations/2');
+      expect((err as SidecarSchemaError).found).toBe(2);
     }
   });
 });
 
 describe('status migration (§6.5)', () => {
   const withStatus = (status: string) =>
-    `---\nschema: webclip-annotations/1\nannotates: "Clips/Note.md"\n---\n\n` +
+    `---\nannotation_schema: 1\nannotates: "Clips/Note.md"\n---\n\n` +
     `> hello world ^anno-X\n\n\`\`\`anno\nid: X\nstatus: ${status}\n\`\`\`\n`;
 
   it('migrates the legacy two-value enum on read', () => {
@@ -622,12 +622,12 @@ describe('malformed input', () => {
   });
 
   it('throws SidecarParseError on unterminated frontmatter', () => {
-    expect(() => parseSidecar('---\nschema: webclip-annotations/1\n')).toThrow(SidecarParseError);
+    expect(() => parseSidecar('---\nannotation_schema: 1\n')).toThrow(SidecarParseError);
   });
 
   it('ignores a dangling anno block with no matching quote (dead data)', () => {
     const text = `---
-schema: webclip-annotations/1
+annotation_schema: 1
 annotates: "Clips/Note.md"
 ---
 
@@ -648,7 +648,7 @@ status: exact
 
   it('throws SidecarParseError on an unterminated anno block', () => {
     const text = `---
-schema: webclip-annotations/1
+annotation_schema: 1
 annotates: "Clips/Note.md"
 ---
 
@@ -663,7 +663,7 @@ status: exact
 
   it('throws SidecarParseError on an invalid status', () => {
     const text = `---
-schema: webclip-annotations/1
+annotation_schema: 1
 annotates: "Clips/Note.md"
 ---
 
@@ -692,7 +692,7 @@ describe('CRLF and BOM tolerance', () => {
 describe('fault isolation (tolerant parse)', () => {
   it('skips a malformed unit and keeps the good ones, reporting issues', () => {
     const text = `---
-schema: webclip-annotations/1
+annotation_schema: 1
 annotates: "Clips/Note.md"
 ---
 
@@ -727,7 +727,7 @@ status: exact
 
   it('isolates an unterminated fence, keeping the units before it', () => {
     const text = `---
-schema: webclip-annotations/1
+annotation_schema: 1
 annotates: "Clips/Note.md"
 ---
 
@@ -752,7 +752,7 @@ status: exact
 
   it('still throws (strict) when no onIssue callback is given', () => {
     const text = `---
-schema: webclip-annotations/1
+annotation_schema: 1
 annotates: "Clips/Note.md"
 ---
 
@@ -769,7 +769,7 @@ status: bogus
   it('keeps frontmatter/schema problems fatal even in tolerant mode', () => {
     expect(() => parseSidecar('> q\n', () => {})).toThrow(SidecarParseError);
     expect(() =>
-      parseSidecar('---\nschema: webclip-annotations/2\nannotates: "x"\n---\n', () => {}),
+      parseSidecar('---\nannotation_schema: 2\nannotates: "x"\n---\n', () => {}),
     ).toThrow(SidecarSchemaError);
   });
 });

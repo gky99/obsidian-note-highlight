@@ -198,7 +198,7 @@ export class MarginaliaSettingTab extends PluginSettingTab {
       cls: 'setting-item-description',
       text:
         'Key/value pairs added to every new annotation file’s frontmatter (when you first ' +
-        'highlight a note or import its highlights). schema, annotates, and source_hash are always set.',
+        'highlight a note or import its highlights). annotation_schema, annotates, and source_hash are always set.',
     });
 
     const grid = containerEl.createDiv({ cls: 'mrg-kv-table' });

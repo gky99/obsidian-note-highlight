@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | **Status** | Draft — design agreed, not yet implemented |
-| **Schema version** | `webclip-annotations/1` |
+| **Schema version** | `annotation_schema: 1` |
 | **Last updated** | 2026-06-19 |
 | **Author** | _(you)_ |
 
@@ -64,12 +64,14 @@ Annotations live in a companion file (e.g. `Clips/The Article.annotations.md`), 
 - **Cost accepted:** highlights are invisible in *other* Markdown apps (there's no markup in the source), and the link is "soft" — resolved by search rather than stored. Both are acceptable given the goals.
 - **Alternative recorded:** *one note per annotation* in a folder. Better if the future need is cross-document thematic coding (each annotation becomes a queryable entity for Bases/Dataview), at the cost of file explosion and a worse per-document overview. Same anchor schema either way — only the container changes. **Chosen: single-file-per-source.** Revisit if cross-doc querying becomes primary.
 
-**Sidecar location & the `sidecarFolder` setting.** By default a sidecar sits *alongside* its source (`Clips/The Article.annotations.md`) — the canonical name embeds the full source path, so it is globally unique and never collides. An optional `sidecarFolder` instead stores sidecars **directly in that one exact folder**, named by the source's *basename* (`<folder>/The Article.annotations.md`); the source's directory is **not** mirrored beneath it. This is what the user asked for ("the exact folder, output not placed relative to it"), and matches how Obsidian's own attachment-folder setting behaves.
+**Identity is `annotates`, not the filename or folder.** A sidecar belongs to whatever clip its `annotates` frontmatter resolves to — full stop. The store *finds* a clip's annotation file(s) by **scanning for `annotates` that resolves to the source** (`sidecarsFor`), wherever they live and whatever they are named; the path convention below only decides where to *create* the first one. This is what makes annotation files **freely movable**: relocate or rename a sidecar and the next load still finds it (a path-based lookup would silently spawn a fresh file and orphan the moved one). `annotates` is stored as a **wikilink** (`[[path]]`, `.md` dropped), not a bare path. *Failure mode it avoids:* a stored path string silently breaks the moment the source note is moved/renamed, whereas Obsidian rewrites a wikilink to follow it (frontmatter wikilinks participate in Obsidian's link-update pass). The runtime resolves the link back to a concrete vault path via the metadata cache (`resolveAnnotates` → `getFirstLinkpathDest`), which also covers a link Obsidian rewrote to shortest form. **Gotcha:** the value must be a *quoted* YAML scalar (`annotates: '[[…]]'`) for Obsidian to treat it as a link — a bare `[[…]]` parses as a YAML flow sequence (an array) and is ignored; js-yaml quotes any `[`-leading string automatically, so emitting a plain JS string works.
 
-- **Cost: basename collisions.** Two same-named notes in different folders (`A/Note.md`, `B/Note.md`) want the same canonical sidecar name. The flat layout cannot avoid this; the mirror layout did, at the price of nesting. We keep the flat layout and *resolve the collision explicitly* rather than silently sharing or mis-pointing (consistent with §4.6 "orphan, never mis-point").
-- **First-come owns the canonical name.** The first note to be annotated gets `<folder>/Note.annotations.md`. A later same-named note, on its **first** highlight, is prompted (a modal) to: **keep separate** (its own numbered sidecar `<folder>/Note-1.annotations.md` — the first free slot), **continue** (share the first note's sidecar; both read it best-effort, the off-note's highlights may orphan), or **cancel**. The number is a positional slot, **not** stored anywhere or derived from the source: a numbered sidecar re-locates on reload by *probing* the slots and matching `annotates` (§4.5 — no stored offsets/index; resolution stays live by content). Probing stops at the first empty slot, which is safe because the plugin never auto-deletes a sidecar (emptied ones persist), so a numbered cluster has no gaps.
-- **Authoritative link is still `annotates`.** The sidecar→source binding is the `annotates` frontmatter, never the file name — so numbered and shared sidecars resolve correctly, and `resolveSourcePath` (opening a sidecar directly) prefers `annotates` over the now-lossy name-based inverse.
-- **Accepted costs of sharing.** A note that *opens* a same-named sibling's sidecar before annotating it (passive read, via the shared fallback) shows that sibling's highlights best-effort until it makes its own — mostly as orphans, since they don't anchor in different text; and a **continue/share** note may re-prompt on its first highlight in a later session (the share choice isn't persisted). The **keep separate** path has neither wart — its numbered sidecar is found by probe every session — so it is the recommended default.
+- **Multiple files for one clip → render the union; the primary wins overlaps.** A clip can end up with several annotation files (a copy, a sync conflict, a deliberate split). The store loads them all, resolves each independently, and merges (`mergeResolved`): every non-overlapping mark shows, but where marks overlap — including a wholesale copy, which shares ids — **only the primary file's** version renders, upholding §4.4 "one passage, one highlight" *across* files. The **primary** (`pickPrimary`) is the session-sticky bound file → the file at the canonical location → newest `mtime` → lexicographic tiebreak; it also receives every new highlight.
+
+**Sidecar location & the `sidecarFolder` setting.** By default a sidecar is *created* alongside its source (`Clips/The Article.annotations.md`) — the canonical name embeds the full source path, so it is globally unique and never collides. An optional `sidecarFolder` instead creates sidecars **directly in that one exact folder**, named by the source's *basename* (`<folder>/The Article.annotations.md`); the source's directory is **not** mirrored beneath it. This matches how Obsidian's own attachment-folder setting behaves. (Lookup is by `annotates`, so a file created here can later be moved anywhere and still be found.)
+
+- **Cost: basename collisions on *create*.** Two same-named notes in different folders (`A/Note.md`, `B/Note.md`) want the same canonical sidecar *name* when first annotated. This is purely a filename clash (identity is still `annotates`); we resolve it explicitly rather than silently mis-pointing (§4.6).
+- **The collision modal resolves the name clash.** When a clip has **no** annotation file yet and the canonical name is already taken by a *different* clip, the user is prompted to: **keep separate** (a fresh numbered file `<folder>/Note-1.annotations.md` — the first free slot), **continue — override the link** (take over the existing file *for this clip*: its `annotates`/`source_hash` are repointed here, **detaching** the previous clip, and its current annotations are kept and re-resolved against this clip — they anchor if it is a copy, else orphan, and the user deletes any orphans), or **cancel**. The numbered slot is positional (first-free by existence probe), **not** stored or derived from the source. "Continue" now **persists** (it rewrites `annotates`), so unlike the old share behavior it never re-prompts in a later session.
 
 ### 4.2 Separate the anchor from the annotation
 
@@ -136,8 +138,8 @@ The matching **`anno` block** (the machine record) lives in the trailing section
 
 ````markdown
 ---
-schema: webclip-annotations/1
-annotates: "Clips/The Article.md"
+annotation_schema: 1
+annotates: "[[Clips/The Article]]"
 source_url: "https://example.com/the-article"
 clipped: 2026-06-19
 source_hash: "sha1:ab12cd34ef…"
@@ -188,8 +190,8 @@ comment: true
 
 | Field | Meaning |
 |---|---|
-| `schema` | Versioned format tag; gate parsing/migrations on it. |
-| `annotates` | Vault path of the source note. |
+| `annotation_schema` | Versioned format tag, a **number**; gate parsing/migrations on it. |
+| `annotates` | **Wikilink** to the source note, e.g. `[[Clips/The Article]]` (the `.md` is dropped). Stored as a link rather than a bare path so Obsidian rewrites it when the source note is moved/renamed; the runtime resolves it back to a concrete vault path through the metadata cache (`resolveAnnotates`). |
 | `source_url` | Origin URL of the clip (provenance). |
 | `clipped` | Date the source was clipped. |
 | `source_hash` | Hash of the source file's content; fast "did anything change?" check. |
@@ -733,8 +735,8 @@ preview) which has no analogue here. What landed:
   export* — so you build the palette from the colors you actually highlight with. The palette
   data model is unchanged (colors are literal, §5.4); only its *order* now carries meaning.
 - **Annotation-file frontmatter** — configurable key/value pairs written into *every new
-  sidecar's* frontmatter as it is created (manual highlight or import); `schema` / `annotates`
-  / `source_hash` are reserved (§5.3).
+  sidecar's* frontmatter as it is created (manual highlight or import); `annotation_schema` /
+  `annotates` / `source_hash` are reserved (§5.3).
 - **Confirm-before-delete** — a default-on, opt-out gate on both delete paths (aside card +
   toolbar) via a generic confirm modal. The import preview defaults to its *confirm* button;
   the delete dialog deliberately does **not** (Enter must not destroy a highlight + comment).

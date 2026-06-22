@@ -25,7 +25,7 @@ import type { EditorView } from '@codemirror/view';
 import { DEFAULT_SETTINGS, type MarginaliaSettings } from '@/settings';
 import { AnnotationStore, type ResolvedAnnotation } from '@/store/store';
 import { jumpToAnnotation } from '@/navigation';
-import { isSidecarPath, sourcePathForSidecar } from '@/obsidian/sidecar-path';
+import { resolveAnnotates } from '@/obsidian/sidecar-path';
 import {
   marginaliaEditorExtension,
   setHighlights,
@@ -236,20 +236,24 @@ export default class MarginaliaPlugin extends Plugin implements SettingsHost {
 
   // --- active-file plumbing ----------------------------------------------
 
-  /** The source note an open file is "about" (a sidecar maps back to its source). */
+  /**
+   * The source note an open file is "about". Identity is `annotates` alone (§4.1), so
+   * *any* file (whatever its name or folder) whose `annotates` resolves to a source maps
+   * back to that source — a renamed/relocated annotation file still points home. A normal
+   * note has no `annotates`, so it maps to itself.
+   */
   private resolveSourcePath(path: string): string {
-    if (!isSidecarPath(path, this.settings.sidecarSuffix)) return path;
-    // Prefer the sidecar's own `annotates` record: it is the authoritative link
-    // and survives a custom sidecar folder, which flattens sidecars by basename
-    // so the name-based inverse below can no longer recover the source directory.
     const file = this.app.vault.getAbstractFileByPath(path);
     if (file instanceof TFile) {
       const annotates = this.app.metadataCache.getFileCache(file)?.frontmatter?.annotates;
-      if (typeof annotates === 'string' && annotates) return annotates;
+      // `annotates` is a wikilink; resolve it through the metadata cache so it survives a
+      // source move (Obsidian rewrites the link) and a dropped `.md`.
+      if (typeof annotates === 'string' && annotates) {
+        const source = resolveAnnotates(this.app.metadataCache, path, annotates);
+        if (source) return source;
+      }
     }
-    return (
-      sourcePathForSidecar(path, this.settings.sidecarSuffix, this.settings.sidecarFolder) ?? path
-    );
+    return path;
   }
 
   /**
@@ -310,14 +314,9 @@ export default class MarginaliaPlugin extends Plugin implements SettingsHost {
     const activePath = this.app.workspace.getActiveFile()?.path;
     if (!activePath) return;
     const sourcePath = this.resolveSourcePath(activePath);
-    // The change is relevant if it's the source itself, the canonical sidecar name
-    // (covers a not-yet-loaded create / a shared sidecar), or any sidecar whose
-    // `annotates` points at this source (covers a disambiguated collision sidecar).
-    const isSidecar = isSidecarPath(file.path, this.settings.sidecarSuffix);
-    const relevant =
-      file.path === sourcePath ||
-      file.path === this.store.sidecarPathFor(sourcePath) ||
-      (isSidecar && this.resolveSourcePath(file.path) === sourcePath);
+    // Relevant if the change is the source itself, or any annotation file whose
+    // `annotates` points at it (identified by link, not name/location — §4.1).
+    const relevant = file.path === sourcePath || this.resolveSourcePath(file.path) === sourcePath;
     if (!relevant) return;
     const sourceFile = this.app.vault.getAbstractFileByPath(sourcePath);
     if (sourceFile instanceof TFile) void this.store.load(sourceFile);

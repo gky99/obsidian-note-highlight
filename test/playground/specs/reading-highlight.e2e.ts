@@ -46,10 +46,18 @@ async function setupAndOpen(c: Case) {
     return browser.executeObsidian(
         async ({ app }, file, body, pick) => {
             const obs = app as any;
-            for (const p of [file, file.replace(/\.md$/, ".annotations.md")]) {
-                const f = obs.vault.getAbstractFileByPath(p);
-                if (f) await obs.vault.delete(f);
+            // Clean slate, folder-agnostic: drop the source and EVERY annotation file
+            // that points at it (the vault configures a custom sidecarFolder, and the
+            // store now finds sidecars by `annotates` wherever they live, so a stale one
+            // would be picked up and appended to).
+            const base = file.replace(/\.md$/, "");
+            for (const f of obs.vault.getMarkdownFiles()) {
+                if (!f.path.includes(".annotations")) continue;
+                const t = await obs.vault.read(f).catch(() => "");
+                if (t.includes(`[[${base}]]`)) await obs.vault.delete(f).catch(() => {});
             }
+            const stale = obs.vault.getAbstractFileByPath(file);
+            if (stale) await obs.vault.delete(stale);
             const tfile = await obs.vault.create(file, body);
             await new Promise((r) => setTimeout(r, 300));
 
@@ -69,6 +77,10 @@ async function setupAndOpen(c: Case) {
                 active: true,
             });
 
+            // Re-resolve from the cold store before asserting: the load the reopen
+            // kicks off is async/fire-and-forget, so read it deterministically here.
+            // (The reading-mode paint itself is still proven by the poll below.)
+            await plugin.store.load(tfile);
             const resolved = plugin.store.getResolved(file);
             return {
                 quote: anno?.quote ?? null,

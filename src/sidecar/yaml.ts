@@ -27,7 +27,7 @@ const ANNO_KEY_ORDER: readonly string[] = [
 
 /** Canonical key order for frontmatter; unknown keys trail, in insertion order. */
 const FRONTMATTER_KEY_ORDER: readonly string[] = [
-  'schema',
+  'annotation_schema',
   'annotates',
   'source_url',
   'clipped',

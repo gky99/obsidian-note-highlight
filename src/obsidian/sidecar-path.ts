@@ -12,7 +12,13 @@
  * beneath it. An empty folder keeps the sidecar alongside its source. (Trade-off:
  * two same-named notes in different folders map to the same sidecar; the sidecar's
  * `annotates` frontmatter remains the authoritative source link.)
+ *
+ * The `annotates` value itself is stored as a **wikilink** (`[[path]]`, `.md` dropped)
+ * rather than a bare path, so Obsidian rewrites it when the source note is moved or
+ * renamed (a stored path string would silently break). The helpers at the bottom of this
+ * file convert a source path to that link form and resolve it back to a vault path.
  */
+import type { MetadataCache } from 'obsidian';
 
 const MD_EXT = '.md';
 
@@ -90,4 +96,48 @@ export function sourcePathForSidecar(
     if (path.startsWith(prefix)) path = path.slice(prefix.length);
   }
   return `${path.slice(0, -tail.length)}${MD_EXT}`;
+}
+
+/**
+ * The wikilink form of the `annotates` value for a source path: `[[<path>]]` with the
+ * `.md` extension dropped (so it reads cleanly and matches how Obsidian renders links).
+ * Stored as a link so Obsidian keeps it pointing at the source through a move/rename — a
+ * bare path string would not survive one.
+ */
+export function annotatesLink(sourcePath: string): string {
+  const inner = sourcePath.endsWith(MD_EXT) ? sourcePath.slice(0, -MD_EXT.length) : sourcePath;
+  return `[[${inner}]]`;
+}
+
+/**
+ * The bare link target inside an `annotates` value. Accepts the wikilink form
+ * (`[[path]]`, `[[path|alias]]`, `[[path#heading]]`) and — for back-compat with the old
+ * format and hand-edits — a plain path string. Returns the linkpath stripped of any
+ * `|alias` / `#subpath` (and without restoring `.md`), or `null` when empty.
+ */
+export function annotatesLinkpath(value: string): string | null {
+  let inner = value.trim();
+  if (inner.startsWith('[[') && inner.endsWith(']]')) inner = inner.slice(2, -2);
+  inner = inner.split('|')[0].split('#')[0].trim();
+  return inner || null;
+}
+
+/**
+ * Resolve a sidecar's `annotates` value to the concrete vault path of its source note.
+ * The value is a wikilink, so it is resolved through the metadata cache — meaning a link
+ * Obsidian rewrote (e.g. to shortest form) when the source moved still points home, and a
+ * link with the `.md` dropped resolves correctly. Falls back to the literal linkpath plus
+ * `.md` when the target is not (yet) in the vault/cache. Returns `null` only for an empty
+ * value.
+ */
+export function resolveAnnotates(
+  cache: Pick<MetadataCache, 'getFirstLinkpathDest'>,
+  sidecarPath: string,
+  value: string,
+): string | null {
+  const linkpath = annotatesLinkpath(value);
+  if (!linkpath) return null;
+  const dest = cache.getFirstLinkpathDest(linkpath, sidecarPath);
+  if (dest) return dest.path;
+  return linkpath.endsWith(MD_EXT) ? linkpath : `${linkpath}${MD_EXT}`;
 }

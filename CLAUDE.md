@@ -33,7 +33,8 @@ The single most important rule. Two zones:
 - `src/color.ts` — color resolution shared by every renderer: a stored color is a built-in token (`yellow`…`orange`, theme-aware CSS class) OR an arbitrary `#hex` (inline style). `renderColor()` returns `{ className?, background?, solid }`. Stored values are literal, never palette indices, so a highlight's look survives palette edits.
 - `src/sidecar/` — parse/serialize the sidecar `.md` format; round-trip-safe.
 - `src/resolver/` — the §6 selector cascade: exact → context → fuzzy → orphan.
-- `src/obsidian/` — `metadata.ts` (metadataCache → resolver `SourceStructure`) and `sidecar-path.ts` (folder-aware: optional `sidecarFolder` stores sidecars **directly** in that exact folder, named by the source's basename — the source's directory is *not* mirrored beneath it; the name-based inverse is therefore lossy for the folder case, so `resolveSourcePath` prefers the sidecar's `annotates` frontmatter). These use **`import type` only** from `obsidian`, so they stay testable.
+- `src/obsidian/` — `metadata.ts` (metadataCache → resolver `SourceStructure`) and `sidecar-path.ts` (folder-aware: optional `sidecarFolder` is where a **new** sidecar is created, directly in that exact folder, named by the source's basename — the source's directory is *not* mirrored beneath it). An annotation file's identity is its `annotates` frontmatter (a wikilink), **not** its name/location, so a sidecar can be freely moved; lookup scans by `annotates` (`store.sidecarsFor`) and `resolveSourcePath` resolves it via `resolveAnnotates`/`annotatesLink`. These use **`import type` only** from `obsidian`, so they stay testable.
+- `src/store/merge.ts` — pure helpers for combining a clip's annotation files: `pickPrimary` (the file that wins overlaps + receives new highlights) and `mergeResolved` (union across files, primary wins any id/range duplicate). Unit-tested (`merge.test.ts`).
 
 **Obsidian runtime — typechecked, NOT unit-tested (needs a live vault).**
 - `src/store/` — load + live re-resolve + atomic sidecar write-back + highlight creation. The runtime hub.
@@ -145,27 +146,35 @@ When adding a module, decide its zone first. If it can be pure, make it pure.
 - Highlights are pushed into each open editor for a file via a `StateEffect`
   (`setHighlights(view, specs)`); the ViewPlugin maps them through doc changes.
 - Sidecar writes go through `vault.process` (atomic read-modify-write); a new sidecar
-  is `vault.create`d with `schema`/`annotates`/`source_hash` frontmatter. With a custom
-  `sidecarFolder`, the store `ensureParentFolder`s the (exact) folder before create.
-- **Flat-folder name collisions (`sidecarFolder` set).** Two same-named notes in
-  different folders map to the same canonical sidecar name. The store's lookup
-  (`sidecarFileFor`) is ownership-aware: own canonical (`annotates` matches) → own
-  *numbered* sidecar (`Note-1.annotations.md`, found by `probeSuffixed` — probe
-  slots `-1, -2, …`, match `annotates`, stop at the first gap; safe because emptied
-  sidecars are never auto-deleted, so a cluster has no gaps) → shared canonical
-  fallback. On a colliding source's **first** write, `writeSidecar` calls the
-  injected `onCollision` resolver (wired in `main.ts` to `SidecarCollisionModal`):
-  **suffix** ("Keep separate" — claim the first free numbered slot, recommended),
-  **continue** ("Continue (share file)" — share the existing sidecar; both notes
-  read it best-effort, the off-note's may orphan), or **cancel** (`createHighlight`
-  returns `null`). The numbered slot is positional (first-free), *not* derived from
-  the source — re-location is always by probing `annotates`, never a stored number.
-  A session-sticky `resolvedSidecar` map binds the chosen path so repeat writes skip
-  the prompt and bridge the post-`create` metadataCache lag; it is *not* set from a
-  shared-fallback read, so a first write still prompts (a shared note may re-prompt
-  after a reload — acceptable; a "Keep separate" note is found by probe and never
-  re-prompts). Collisions only arise in folder mode; alongside, the canonical name
-  embeds the full source path and is always unique.
+  is `vault.create`d with `annotation_schema`/`annotates`/`source_hash` frontmatter. With a
+  custom `sidecarFolder`, the store `ensureParentFolder`s the (exact) folder before create.
+- **`annotation_schema` is a number** (the schema gate; was the string `schema`), and
+  **`annotates` is a wikilink** `[[path]]` (`.md` dropped), not a bare path — so Obsidian
+  rewrites it when the source note is moved/renamed. Writers call `annotatesLink(sourcePath)`;
+  readers (`store.annotatesOf`, `main.resolveSourcePath`) call `resolveAnnotates`, which
+  resolves the link through `metadataCache.getFirstLinkpathDest` (so a link Obsidian rewrote
+  to shortest form on a move still points home), falling back to `linkpath + .md`. The pure
+  layer still treats `annotates` as an opaque string (back-compat accepts a bare path too).
+- **Identity = `annotates`; sidecars are freely movable.** `store.sidecarsFor(source)`
+  scans `vault.getMarkdownFiles()` and keeps every file whose `annotates` resolves to the
+  source (`annotatesOf` short-circuits files with no `annotates`), plus the session-sticky
+  bound file (to bridge the post-`create` metadataCache lag). So a sidecar can be moved or
+  renamed anywhere and is still found. `load` parses+resolves each file independently
+  (one bad file → skip+Notice, others still load), picks a **primary** (`pickPrimary`:
+  bound → canonical-path → newest `mtime` → lexicographic) and merges (`mergeResolved`:
+  union, primary wins any id/overlapping-range duplicate). New highlights and `mutateById`
+  (color/comment/delete, routed by each `ResolvedAnnotation.sidecarPath`) target the file
+  that actually holds the mark; new highlights go to the primary.
+- **Flat-folder name collisions only happen on *create* (`sidecarFolder` set).** When a clip
+  has **no** annotation file yet and the canonical *name* is taken by a different clip,
+  `writeSidecar` calls the injected `onCollision` resolver (wired in `main.ts` to
+  `SidecarCollisionModal`): **suffix** ("Keep separate" — claim the first free numbered slot
+  `Note-1.annotations.md` via `firstFreePath`, recommended), **continue** ("Continue (use
+  these annotations here)" — **override the link**: rewrite the existing file's
+  `annotates`/`source_hash` to *this* clip, detaching the previous one, keep its annotations,
+  append the new), or **cancel** (`createHighlight` returns `null`). "Continue" persists (it
+  rewrites `annotates`), so it never re-prompts in a later session. Collisions only arise in
+  folder mode; alongside, the canonical name embeds the full source path and is always unique.
 
 ## Highlight-creation & color surfaces (added after the original design)
 
@@ -308,7 +317,7 @@ ported — they don't apply. What landed:
 - **Annotation-file frontmatter** — `settings.sidecarFrontmatter: {key,value}[]`, edited via
   a Key/Value grid table (`renderFrontmatterSection`), written into **every new sidecar's**
   frontmatter by `store.newFrontmatter` (so both manual highlighting *and* import get them);
-  reserved keys `schema`/`annotates`/`source_hash` can't be overridden.
+  reserved keys `annotation_schema`/`annotates`/`source_hash` can't be overridden.
 - **Delete confirmation** — `settings.confirmDelete` (default **on**) gates *both* delete
   paths (aside trash, toolbar) through `src/ui/confirm.ts` (`confirm()` → `Promise<boolean>`,
   Esc/click-outside = no). Shared copy in `DELETE_PROMPT`; `confirmThenDelete` lives in both
@@ -425,6 +434,19 @@ Core is done and tested. The runtime layers build and typecheck; the selection t
 custom palette, custom save location, and aside card controls are in. Recent work, newest
 first:
 
+- **Frontmatter format change** (Design.md §5.2/§5.3): `schema: webclip-annotations/1` (string)
+  → `annotation_schema: 1` (**number**), and `annotates` is now a **wikilink** `[[path]]`
+  (`.md` dropped) so Obsidian keeps it pointing at the source across a move/rename. New pure
+  helpers in `sidecar-path.ts` (`annotatesLink` / `annotatesLinkpath` / `resolveAnnotates`,
+  unit-tested); runtime reads resolve via `metadataCache.getFirstLinkpathDest`. **Breaking on
+  read** — the schema gate rejects old sidecars; existing files need `annotation_schema: <n>`
+  (the one sample sidecar in this vault was migrated in place). js-yaml emits the link single-
+  quoted (`'[[…]]'`), which Obsidian parses to a string and recognizes as a `frontmatterLinks`
+  entry (verified in obsidian.asar — the link must be a quoted string, not bare `[[…]]`/a flow
+  seq). **Verified in-vault** by `test/playground/specs/sidecar-format.e2e.ts` (real Obsidian
+  1.12.7): highlighting a note writes `annotation_schema: 1` + `annotates: '[[Clips/…]]'`, and
+  the written link resolves back to the source via `getFirstLinkpathDest` (teeth-checked —
+  fails when `annotatesLink` is neutralized to a bare path).
 - **Frontmatter excluded from anchoring** (Design.md §6.5). A web clip's YAML `title`
   duplicates its H1, so the whole-file search anchored that H1 highlight *into* the
   frontmatter — invisible in Live Preview (Properties widget), yet reading mode's painter
@@ -447,14 +469,23 @@ first:
   settings/UI ported from the exporter (see "Settings & shared UI") — folder autocomplete,
   the palette swatch table (drag-reorder + export-color autocomplete), annotation-file
   frontmatter fields, and a confirm-before-delete toggle.
-- **`sidecarFolder` = exact folder + collision handling** (Design.md §4.1): a custom folder is
-  now the *exact* destination (sidecars sit directly in it, named by the source basename), so
-  the store's lookup is ownership-aware (own canonical / own numbered `Note-1` via
-  `probeSuffixed` / shared fallback) and a colliding source's first write prompts
-  `src/ui/collision-modal.ts` (via `store.onCollision`) — Keep separate / Continue (share) /
-  Cancel. `resolveSourcePath` prefers the sidecar's `annotates` over the now-lossy name-based
-  inverse; a session-sticky `resolvedSidecar` binding skips re-prompts. **`writeSidecar` now
-  returns a boolean** (false = collision cancel); `createHighlight`/`createHighlights` honor it.
+- **Annotation files identified by `annotates`; freely movable** (Design.md §4.1): a sidecar
+  belongs to whatever clip its `annotates` link resolves to, *not* its name/location. `load`
+  finds a clip's file(s) via `store.sidecarsFor` (scan by `annotates`), resolves each
+  independently, picks a primary (`merge.ts#pickPrimary`) and renders the union with
+  primary-wins overlap (`merge.ts#mergeResolved`). Multiple files for one clip are supported
+  (copy/sync/split). New highlights + edits route by `ResolvedAnnotation.sidecarPath`. The
+  collision modal now resolves a *filename* clash only; **Continue = override the link** (take
+  over the file for this clip, detaching the previous — `writeSidecar` rewrites
+  `annotates`/`source_hash`). Replaced `sidecarFileFor`/`probeSuffixed` with
+  `sidecarsFor`/`firstFreePath`; `resolveSourcePath`/`maybeReload` (in `main.ts`) now map *any*
+  `annotates`-bearing file home, not just `*.annotations.md`-named ones. Pure merge logic
+  unit-tested (`merge.test.ts`); end-to-end in `test/playground/specs/movable-sidecar.e2e.ts`.
+- **`sidecarFolder` = exact folder** (Design.md §4.1): a custom folder is the *exact*
+  destination for a **newly created** sidecar (named by the source basename); a colliding
+  source's first write prompts `src/ui/collision-modal.ts` (via `store.onCollision`) — Keep
+  separate / Continue (override the link) / Cancel. **`writeSidecar` returns a boolean**
+  (false = collision cancel); `createHighlight`/`createHighlights` honor it.
 - Two cross-block reading-mode fixes: a quote spanning multiple block elements now **paints**
   in reading mode (per-block projection of the per-element slice, `reading.ts`, §7.2), and
   clicking its card **jumps** in reading mode (mode-aware `view.currentMode.applyScroll(line)`,

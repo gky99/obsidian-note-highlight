@@ -15,20 +15,20 @@ export class SidecarError extends Error {
 }
 
 /**
- * The sidecar's frontmatter `schema` is missing or names a version this build
- * does not understand (§5.3). Parsing is gated on the schema, so this is fatal.
+ * The sidecar's frontmatter `annotation_schema` is missing or names a version this
+ * build does not understand (§5.3). Parsing is gated on it, so this is fatal.
  */
 export class SidecarSchemaError extends SidecarError {
-  /** The `schema` value we found (or `undefined` if absent). */
-  readonly found: string | undefined;
+  /** The `annotation_schema` value we found (or `undefined` if absent/non-numeric). */
+  readonly found: number | undefined;
   /** The schema version this build supports. */
-  readonly expected: string;
+  readonly expected: number;
 
-  constructor(found: string | undefined, expected: string) {
+  constructor(found: number | undefined, expected: number) {
     super(
       found === undefined
-        ? `Sidecar frontmatter is missing a "schema" field; expected "${expected}".`
-        : `Unsupported sidecar schema "${found}"; this build understands "${expected}".`,
+        ? `Sidecar frontmatter is missing an "annotation_schema" field; expected ${expected}.`
+        : `Unsupported sidecar annotation_schema ${found}; this build understands ${expected}.`,
     );
     this.name = 'SidecarSchemaError';
     this.found = found;

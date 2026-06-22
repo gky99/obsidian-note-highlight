@@ -9,7 +9,7 @@
  */
 
 /** The only schema version this build understands. Gate parsing on it (§5.3). */
-export const SCHEMA_VERSION = 'webclip-annotations/1';
+export const SCHEMA_VERSION = 1;
 
 /** A half-open character range `[from, to)` in some text's offset space. */
 export interface Range {
@@ -32,9 +32,14 @@ export type AnnotationStatus = 'unique' | 'exact' | 'orphan';
  * See Design.md §5.3.
  */
 export interface SidecarFrontmatter {
-  /** Versioned format tag; gate parsing/migrations on it. */
-  schema: string;
-  /** Vault path of the source note this sidecar annotates. */
+  /** Versioned format tag (a number); gate parsing/migrations on it. */
+  annotation_schema: number;
+  /**
+   * Wikilink to the source note this sidecar annotates, e.g. `[[Clips/The Article]]`
+   * (the `.md` extension is dropped). Stored as a link — not a bare path — so Obsidian
+   * rewrites it when the source note is moved/renamed; the runtime resolves it back to a
+   * concrete vault path via the metadata cache (`resolveAnnotates`).
+   */
   annotates: string;
   /** Origin URL of the clip (provenance). */
   source_url?: string;
