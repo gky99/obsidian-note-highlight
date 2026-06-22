@@ -6,7 +6,7 @@
 |---|---|
 | **Status** | Draft — design agreed, not yet implemented |
 | **Schema version** | `annotation_schema: 1` |
-| **Last updated** | 2026-06-19 |
+| **Last updated** | 2026-06-22 |
 | **Author** | _(you)_ |
 
 ---
@@ -67,6 +67,7 @@ Annotations live in a companion file (e.g. `Clips/The Article.annotations.md`), 
 **Identity is `annotates`, not the filename or folder.** A sidecar belongs to whatever clip its `annotates` frontmatter resolves to — full stop. The store *finds* a clip's annotation file(s) by **scanning for `annotates` that resolves to the source** (`sidecarsFor`), wherever they live and whatever they are named; the path convention below only decides where to *create* the first one. This is what makes annotation files **freely movable**: relocate or rename a sidecar and the next load still finds it (a path-based lookup would silently spawn a fresh file and orphan the moved one). `annotates` is stored as a **wikilink** (`[[path]]`, `.md` dropped), not a bare path. *Failure mode it avoids:* a stored path string silently breaks the moment the source note is moved/renamed, whereas Obsidian rewrites a wikilink to follow it (frontmatter wikilinks participate in Obsidian's link-update pass). The runtime resolves the link back to a concrete vault path via the metadata cache (`resolveAnnotates` → `getFirstLinkpathDest`), which also covers a link Obsidian rewrote to shortest form. **Gotcha:** the value must be a *quoted* YAML scalar (`annotates: '[[…]]'`) for Obsidian to treat it as a link — a bare `[[…]]` parses as a YAML flow sequence (an array) and is ignored; js-yaml quotes any `[`-leading string automatically, so emitting a plain JS string works.
 
 - **Multiple files for one clip → render the union; the primary wins overlaps.** A clip can end up with several annotation files (a copy, a sync conflict, a deliberate split). The store loads them all, resolves each independently, and merges (`mergeResolved`): every non-overlapping mark shows, but where marks overlap — including a wholesale copy, which shares ids — **only the primary file's** version renders, upholding §4.4 "one passage, one highlight" *across* files. The **primary** (`pickPrimary`) is the session-sticky bound file → the file at the canonical location → newest `mtime` → lexicographic tiebreak; it also receives every new highlight.
+- **The whole runtime routes per file, by `sidecarPath`.** Because a clip's marks can live in different files, every `ResolvedAnnotation` carries the `sidecarPath` it came from. Re-resolution (`resolveAll`) and the §6.5 self-heal repair-collection run **once per file**; edits (`mutateById` — recolor/comment/delete), the repair write-back (`persistRepairs`), and the deletion-survivor commit (`commitSurvivor`) all target *the file that actually holds that mark*, never a single "the sidecar". This is the seam where movable-by-`annotates` identity meets §6.5 self-healing: each file self-heals independently, then `mergeResolved` folds the results with the primary winning overlaps.
 
 **Sidecar location & the `sidecarFolder` setting.** By default a sidecar is *created* alongside its source (`Clips/The Article.annotations.md`) — the canonical name embeds the full source path, so it is globally unique and never collides. An optional `sidecarFolder` instead creates sidecars **directly in that one exact folder**, named by the source's *basename* (`<folder>/The Article.annotations.md`); the source's directory is **not** mirrored beneath it. This matches how Obsidian's own attachment-folder setting behaves. (Lookup is by `annotates`, so a file created here can later be moved anywhere and still be found.)
 
@@ -299,7 +300,7 @@ Nothing is written during a run, so a crash mid-deletion leaves the original to 
 
 **In-session vs. out-of-session.** The edit log is the CM6 transaction's `ChangeSet` and exists **only while the file is open**; it supplies the precise, observed mapping that lets the in-session path skip context confirmation (except the fully-contains guard). Edits by another app / Sync / git / while closed produce no transaction and are caught on **first load** by the resolver, which *must* confirm via before/after/heading because nothing observed the move. Both paths converge on the same `status` verdict.
 
-**Write discipline.** The in-memory record updates live; **disk writes are debounced** (no per-keystroke churn, and it sidesteps the strict-write refusal and read-modify-write races, §10 #11). Load-time repairs batch into a single write and only when bytes actually changed — note this means *opening* an externally-edited note can rewrite its sidecar, the accepted cost of self-healing.
+**Write discipline.** The in-memory record updates live; **disk writes are debounced** (no per-keystroke churn, and it sidesteps the strict-write refusal and read-modify-write races, §10 #11). Load-time repairs batch into a single write **per annotation file** (§4.1) and only when bytes actually changed — note this means *opening* an externally-edited note can rewrite its sidecar, the accepted cost of self-healing.
 
 ---
 
