@@ -211,6 +211,23 @@
   outline-offset: 1px;
 }
 
+/* Card action icons (copy reference, open in annotations file): unobtrusive,
+   brighten to the normal text color on hover. */
+.mrg-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+  color: var(--text-muted);
+  background: transparent;
+  box-shadow: none;
+  cursor: pointer;
+}
+
+.mrg-icon-button:hover {
+  color: var(--text-normal);
+}
+
 /* Delete button: an unobtrusive trash icon that reddens on hover. */
 .mrg-delete-button {
   display: inline-flex;

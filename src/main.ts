@@ -24,7 +24,7 @@ import type { EditorView } from '@codemirror/view';
 
 import { DEFAULT_SETTINGS, type MarginaliaSettings } from '@/settings';
 import { AnnotationStore, type ResolvedAnnotation } from '@/store/store';
-import { jumpToAnnotation } from '@/navigation';
+import { jumpToAnnotation, openAnnotationInSidecar, copyAnnotationReference } from '@/navigation';
 import { resolveAnnotates } from '@/obsidian/sidecar-path';
 import {
   marginaliaEditorExtension,
@@ -140,6 +140,9 @@ export default class MarginaliaPlugin extends Plugin implements SettingsHost {
             jumpToAnnotation(this.app, this.store, sourcePath, id, flashRange, () =>
               scrollSync.suppress(),
             ),
+          openSidecar: (sidecarPath, id) =>
+            openAnnotationInSidecar(this.app, sidecarPath, id),
+          copyReference: (sidecarPath, id) => copyAnnotationReference(this.app, sidecarPath, id),
         }),
     );
 

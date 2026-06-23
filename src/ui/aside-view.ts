@@ -40,6 +40,10 @@ export interface AsideDeps {
   settings: MarginaliaSettings;
   /** Forward jump (navigation.jumpToAnnotation, already implemented in the plugin). */
   jumpTo: (sourcePath: string, id: string) => void | Promise<void>;
+  /** Open the annotation in its sidecar (.md) at the quote's `^anno-<id>` block. */
+  openSidecar: (sidecarPath: string, id: string) => void | Promise<void>;
+  /** Copy a wikilink to the annotation's quote block to the clipboard. */
+  copyReference: (sidecarPath: string, id: string) => void | Promise<void>;
 }
 
 export class MarginaliaAsideView extends ItemView {
@@ -249,11 +253,43 @@ export class MarginaliaAsideView extends ItemView {
     // Comment — rendered markdown that swaps to a textarea on click.
     this.renderComment(card, sourcePath, annotation.id, annotation.comment);
 
-    // Footer: color button · status · delete.
+    // Footer: color button · status · copy-ref · open-in-sidecar · delete.
+    // The copy/open buttons target the record in the sidecar by its `^anno-<id>`
+    // block, so they work even when the annotation is orphaned in the source.
     const footer = card.createDiv({ cls: 'mrg-card-footer' });
     this.renderColorControl(footer, sourcePath, annotation.id, color);
     this.renderStatus(footer, result);
+    this.renderCopyRefButton(footer, item.sidecarPath, annotation.id);
+    this.renderOpenSidecarButton(footer, item.sidecarPath, annotation.id);
     this.renderDeleteButton(footer, sourcePath, annotation.id);
+  }
+
+  /** A button that copies a wikilink to this annotation's block in the sidecar. */
+  private renderCopyRefButton(footer: HTMLElement, sidecarPath: string, id: string): void {
+    const button = footer.createEl('button', {
+      cls: 'mrg-icon-button',
+      attr: { type: 'button', 'aria-label': 'Copy reference to annotation' },
+      title: 'Copy reference (wikilink to this annotation)',
+    });
+    setIcon(button, 'copy');
+    button.addEventListener('click', (e) => {
+      e.stopPropagation(); // don't trigger the card's jump handler
+      void this.deps.copyReference(sidecarPath, id);
+    });
+  }
+
+  /** A button that opens this annotation in its annotations file, at the block. */
+  private renderOpenSidecarButton(footer: HTMLElement, sidecarPath: string, id: string): void {
+    const button = footer.createEl('button', {
+      cls: 'mrg-icon-button',
+      attr: { type: 'button', 'aria-label': 'Open in annotations file' },
+      title: 'Open in annotations file',
+    });
+    setIcon(button, 'external-link');
+    button.addEventListener('click', (e) => {
+      e.stopPropagation(); // don't trigger the card's jump handler
+      void this.deps.openSidecar(sidecarPath, id);
+    });
   }
 
   private renderComment(

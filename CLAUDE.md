@@ -229,6 +229,16 @@ When adding a module, decide its zone first. If it can be pure, make it pure.
 - **Aside card UI**: clicking a card jumps (no Jump button); the color control is one
   swatch button that opens a popup of palette swatches; each card has a trash/delete
   button (`store.deleteAnnotation`). Comment textarea is full-width.
+  - **Per-card sidecar buttons** (footer): **copy reference** (`copy` icon →
+    `navigation.copyAnnotationReference` → clipboard `[[sidecar#^anno-<id>]]`, built from
+    `metadataCache.fileToLinktext` + the pure `obsidian/anno-link.ts` builders) and **open in
+    annotations file** (`external-link` icon → `navigation.openAnnotationInSidecar` →
+    `openLinkText` to `<sidecar>#^anno-<id>`, focusing an existing tab of the sidecar else a
+    new tab). Both target the record by its `^anno-<id>` block ref via
+    `ResolvedAnnotation.sidecarPath`, so they **work even for orphaned annotations** (no live
+    source re-resolution needed — the block ref is in the file). The link-string builders are
+    pure + unit-tested (`anno-link.test.ts`); the runtime nav/clipboard is not (convention).
+    Both injected through `AsideDeps` (`openSidecar`/`copyReference`), like `jumpTo`.
   - **Cards are ordered by document position**, not sidecar/file order (the sidecar binds
     records by id, which need not track the document). The aside's `render()` sorts each
     pass by the live anchored `range.from`; orphans (no range) sink to the end keeping
