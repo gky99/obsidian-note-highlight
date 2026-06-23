@@ -1,7 +1,7 @@
 {
   "id": "marginalia",
   "name": "Marginalia",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "minAppVersion": "1.5.0",
   "description": "PDF-style annotation for web clips and Markdown notes: highlight sub-block spans, attach comments, and review them in a side panel. Annotations are stored non-destructively in a portable sidecar and re-anchored by content on every use.",
   "author": "you",
