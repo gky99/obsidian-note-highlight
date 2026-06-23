@@ -49,7 +49,7 @@ The single most important rule. Two zones:
 
 **Pure core — Obsidian-free, fully unit-tested. Keep it that way.**
 - `src/model/` — shared data types (the contract every layer builds on).
-- `src/text/` — `normalize` (whitespace projection + index map back to true offsets), `hash` (qhash, sha-1), `locate` (reading-mode selection text → source offsets, best-effort; mirrors `reading/project`).
+- `src/text/` — `normalize` (whitespace projection + index map back to true offsets), `hash` (qhash, sha-1), `locate` (reading-mode selection text → source offsets, best-effort; mirrors `reading/project`). **`locate`'s `projectSourceWithMap` must reduce links/images/wikilinks identically to `projectQuoteToText`** — its `.text` is *required* to equal `projectQuoteToText(input)` (a `locate.test.ts` invariant case enforces it across link/image/wikilink samples). Drift there silently breaks reading-mode highlight *creation*: a selection over a rendered link (`[Obsidian](url)`→`Obsidian`) projects to marker-free text but the source projection kept the brackets, so it wasn't found → "could not locate that selection in the note source" (the §7.2 reading-mode-creation bug fixed 2026-06-23).
 - `src/color.ts` — color resolution shared by every renderer: a stored color is a built-in token (`yellow`…`orange`, theme-aware CSS class) OR an arbitrary `#hex` (inline style). `renderColor()` returns `{ className?, background?, solid }`. Stored values are literal, never palette indices, so a highlight's look survives palette edits.
 - `src/sidecar/` — parse/serialize the sidecar `.md` format; round-trip-safe.
 - `src/resolver/` — the §6 selector cascade: exact → context → fuzzy → orphan.

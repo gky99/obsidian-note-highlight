@@ -13,6 +13,14 @@ describe('projectSourceWithMap', () => {
     'plain paragraph with   irregular   spacing',
     '`code` and _under_ and **strong**',
     '\n\nLeading blanks\n\n',
+    // Links / images / wikilinks: the renderer shows only the text, so the
+    // source projection must reduce them exactly as projectQuoteToText does
+    // (regression: a selection spanning a link could not be located, §7.2).
+    'I am a big fan of [Obsidian](https://obsidian.md/). Next sentence.',
+    'See [the [nested] note](url) then',
+    'A [[wikilink]] and a [[target|alias]] inline',
+    'before ![alt text](img.png) after',
+    'mixed **[bold link](url)** and `code`',
   ];
 
   it('produces the same text as projectQuoteToText', () => {
@@ -55,6 +63,23 @@ describe('findSourceRange', () => {
     const range = findSourceRange(source, 'First paragraph');
     expect(range).not.toBeNull();
     expect(source.slice(range!.from, range!.to)).toBe('First paragraph');
+  });
+
+  it('locates a selection that spans a markdown link (rendered as plain text)', () => {
+    // The real failing case (samples/How I use Obsidian for academic work.md):
+    // reading mode renders "[Obsidian](https://obsidian.md/)" as just "Obsidian",
+    // so the selection text has no link syntax — the source projection must too.
+    const source = 'I am a big fan of [Obsidian](https://obsidian.md/). This used to be niche.';
+    const range = findSourceRange(source, 'I am a big fan of Obsidian.');
+    expect(range).not.toBeNull();
+    expect(source.slice(range!.from, range!.to)).toBe('I am a big fan of [Obsidian](https://obsidian.md/).');
+  });
+
+  it('locates a selection that spans a wikilink alias', () => {
+    const source = 'Read the [[Zettelkasten Method|method]] for details.';
+    const range = findSourceRange(source, 'the method for');
+    expect(range).not.toBeNull();
+    expect(source.slice(range!.from, range!.to)).toBe('the [[Zettelkasten Method|method]] for');
   });
 
   it('returns null when the text is not present', () => {

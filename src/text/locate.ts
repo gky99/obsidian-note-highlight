@@ -42,15 +42,69 @@ export function projectSourceWithMap(input: string): { text: string; off: number
   }
   // 2. split('\n').join(' ') — newlines become spaces.
   for (const c of cells) if (c.ch === '\n') c.ch = ' ';
-  // 3. Remove inline emphasis / inline-code markers (styling, not text).
+  // 3. Reduce links / images / wikilinks to the text the renderer actually shows.
+  //    These mirror projectQuoteToText's replacements *in the same order*, kept in
+  //    lock-step so this projection's text stays equal to projectQuoteToText's —
+  //    the invariant findSourceRange relies on (a needle projected one way must be
+  //    findable in the source projected the other). Missing them meant a selection
+  //    spanning a link (the rendered "[Obsidian](url)" → "Obsidian") never matched
+  //    the still-bracketed source and creation failed in reading mode (§7.2).
+  cells = reduceCells(cells, /!\[[^\]]*\]\([^)]*\)/g, dropAll); // images → nothing
+  cells = reduceCells(cells, /\[\[[^\]|]*\|([^\]]*)\]\]/g, keepAlias); // [[a|b]] → b
+  cells = reduceCells(cells, /\[\[([^\]]*)\]\]/g, keepAfterDoubleBracket); // [[a]] → a
+  cells = reduceCells(cells, /\[([^\]]*)\]\([^)]*\)/g, keepAfterBracket); // [t](url) → t
+  // 4. Remove inline emphasis / inline-code markers (styling, not text).
   cells = cells.filter((c) => c.ch !== '*' && c.ch !== '_' && c.ch !== '`');
-  // 4. Collapse every whitespace run to a single space (mapped to the run start).
+  // 5. Collapse every whitespace run to a single space (mapped to the run start).
   cells = collapseWhitespace(cells);
-  // 5. Trim.
+  // 6. Trim.
   while (cells.length > 0 && cells[0].ch === ' ') cells.shift();
   while (cells.length > 0 && cells[cells.length - 1].ch === ' ') cells.pop();
 
   return { text: cells.map((c) => c.ch).join(''), off: cells.map((c) => c.off) };
+}
+
+/**
+ * For a regex match, the `[start, end)` slice of the matched text (in projection
+ * index space) to KEEP — the rest of the match is dropped. `null` drops it all.
+ */
+type KeptSlice = (m: RegExpExecArray) => [number, number] | null;
+
+const dropAll: KeptSlice = () => null;
+/** `[text](url)` → keep `text`: the capture sits right after the opening `[`. */
+const keepAfterBracket: KeptSlice = (m) => [m.index + 1, m.index + 1 + m[1].length];
+/** `[[target]]` → keep `target`: the capture sits right after the opening `[[`. */
+const keepAfterDoubleBracket: KeptSlice = (m) => [m.index + 2, m.index + 2 + m[1].length];
+/** `[[target|alias]]` → keep `alias`: the capture sits right before the closing `]]`. */
+const keepAlias: KeptSlice = (m) => {
+  const end = m.index + m[0].length - 2; // before the trailing "]]"
+  return [end - m[1].length, end];
+};
+
+/**
+ * Apply one reduction to the cell stream, mirroring `String#replace(re, …)` with
+ * a global `re`: cells outside any match pass through unchanged; inside each match
+ * only the cells in `kept(m)` (a sub-slice of the match) survive, dragging their
+ * source offsets along. `re` must carry the `g` flag. Locating the kept capture by
+ * arithmetic on `m.index`/`m[0].length` avoids the ES2022 `d` (indices) flag,
+ * which is outside this project's TS target.
+ */
+function reduceCells(cells: Cell[], re: RegExp, kept: KeptSlice): Cell[] {
+  const s = cells.map((c) => c.ch).join('');
+  const out: Cell[] = [];
+  let last = 0;
+  re.lastIndex = 0;
+  for (let m = re.exec(s); m; m = re.exec(s)) {
+    const start = m.index;
+    const end = start + m[0].length;
+    for (let i = last; i < start; i++) out.push(cells[i]);
+    const slice = kept(m);
+    if (slice) for (let i = slice[0]; i < slice[1]; i++) out.push(cells[i]);
+    last = end;
+    if (m[0].length === 0) re.lastIndex++; // never spin on a zero-width match
+  }
+  for (let i = last; i < cells.length; i++) out.push(cells[i]);
+  return out;
 }
 
 /**
