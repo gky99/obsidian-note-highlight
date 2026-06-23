@@ -247,27 +247,67 @@ export class MarginaliaAsideView extends ItemView {
       void this.deps.jumpTo(sourcePath, annotation.id);
     });
 
-    // Quote — newlines preserved (CSS: white-space: pre-wrap).
-    card.createDiv({ cls: 'mrg-card-quote', text: annotation.quote });
+    // Quote — rendered as Markdown so bold/italic/links/code show styled.
+    // Display-only (links are inert via CSS) so a click anywhere still jumps.
+    const quoteEl = card.createDiv({ cls: 'mrg-card-quote' });
+    this.paintQuote(quoteEl, annotation.quote);
 
-    // Comment — rendered markdown that swaps to a textarea on click.
-    this.renderComment(card, sourcePath, annotation.id, annotation.comment);
+    // Comment — a slot that holds the rendered note (and the inline editor). It
+    // collapses entirely when empty (CSS `:empty`); the footer comment button
+    // opens the editor. `beginEdit` is shared by the slot click and that button.
+    const hasComment = annotation.comment.trim().length > 0;
+    const beginCommentEdit = this.renderComment(card, sourcePath, annotation.id, annotation.comment);
 
-    // Footer: color button · status · copy-ref · open-in-sidecar · delete.
-    // The copy/open buttons target the record in the sidecar by its `^anno-<id>`
-    // block, so they work even when the annotation is orphaned in the source.
+    // Footer (left → right): [color · comment] │ [copy · open · delete] … status.
+    // The editing controls (color, comment) group on the left, a vertical bar
+    // divides them from the sidecar-record actions (copy/open/delete — which work
+    // even when orphaned), and the status mark sits alone on the right.
     const footer = card.createDiv({ cls: 'mrg-card-footer' });
     this.renderColorControl(footer, sourcePath, annotation.id, color);
-    this.renderStatus(footer, result);
+    this.renderCommentButton(footer, beginCommentEdit, hasComment);
+    footer.createDiv({ cls: 'mrg-sep' });
     this.renderCopyRefButton(footer, item.sidecarPath, annotation.id);
     this.renderOpenSidecarButton(footer, item.sidecarPath, annotation.id);
     this.renderDeleteButton(footer, sourcePath, annotation.id);
+    this.renderStatus(footer, result); // margin-left:auto pins it to the right
+  }
+
+  /**
+   * Render the highlighted quote as Markdown (display-only; clicks jump). The
+   * sourcePath is intentionally empty: `MarkdownRenderer.render` runs the whole
+   * markdown post-processor pipeline, including our own reading-mode highlighter,
+   * and the quote's text *is* an annotation — so a real sourcePath would make the
+   * painter re-wrap it in its highlight color here. The color already shows via
+   * the card border + swatch, and quote links are inert (CSS), so '' is safe.
+   */
+  private paintQuote(el: HTMLElement, quote: string): void {
+    void MarkdownRenderer.render(this.deps.app, quote, el, '', this);
+  }
+
+  /** Footer button that opens the inline comment editor; tinted when a note exists. */
+  private renderCommentButton(
+    footer: HTMLElement,
+    beginEdit: () => void,
+    hasComment: boolean,
+  ): void {
+    const button = footer.createEl('button', {
+      cls: hasComment
+        ? 'mrg-icon-button mrg-has-comment clickable-icon'
+        : 'mrg-icon-button clickable-icon',
+      attr: { type: 'button', 'aria-label': hasComment ? 'Edit comment' : 'Add comment' },
+      title: hasComment ? 'Edit comment' : 'Add comment',
+    });
+    setIcon(button, 'message-square');
+    button.addEventListener('click', (e) => {
+      e.stopPropagation(); // don't trigger the card's jump handler
+      beginEdit();
+    });
   }
 
   /** A button that copies a wikilink to this annotation's block in the sidecar. */
   private renderCopyRefButton(footer: HTMLElement, sidecarPath: string, id: string): void {
     const button = footer.createEl('button', {
-      cls: 'mrg-icon-button',
+      cls: 'mrg-icon-button clickable-icon',
       attr: { type: 'button', 'aria-label': 'Copy reference to annotation' },
       title: 'Copy reference (wikilink to this annotation)',
     });
@@ -281,7 +321,7 @@ export class MarginaliaAsideView extends ItemView {
   /** A button that opens this annotation in its annotations file, at the block. */
   private renderOpenSidecarButton(footer: HTMLElement, sidecarPath: string, id: string): void {
     const button = footer.createEl('button', {
-      cls: 'mrg-icon-button',
+      cls: 'mrg-icon-button clickable-icon',
       attr: { type: 'button', 'aria-label': 'Open in annotations file' },
       title: 'Open in annotations file',
     });
@@ -292,23 +332,39 @@ export class MarginaliaAsideView extends ItemView {
     });
   }
 
+  /**
+   * Build the comment slot below the quote and return a `beginEdit` callback that
+   * mounts the inline textarea — shared by clicking the (rendered) note and by the
+   * footer comment button. The slot is empty (and CSS-collapsed) when there's no
+   * note, so the card stays compact until a comment is added.
+   */
   private renderComment(
     card: HTMLElement,
     sourcePath: string,
     id: string,
     comment: string,
-  ): void {
+  ): () => void {
     const view = card.createDiv({ cls: 'mrg-card-comment' });
     view.setAttribute('role', 'textbox');
     view.setAttribute('tabindex', '0');
     this.paintComment(view, sourcePath, comment);
 
     const beginEdit = (): void => {
+      const open = view.querySelector('textarea');
+      if (open instanceof HTMLTextAreaElement) {
+        open.focus(); // already editing (e.g. button pressed twice) — don't remount
+        return;
+      }
       view.empty();
       const ta = view.createEl('textarea', { cls: 'mrg-card-comment-input' });
       ta.value = comment;
-      ta.rows = Math.max(2, comment.split('\n').length);
-      ta.focus();
+
+      // Grow the field to fit its content (height follows the text, with a CSS
+      // min-height floor) instead of a fixed row count. Run on mount + each edit.
+      const autosize = (): void => {
+        ta.style.height = 'auto';
+        ta.style.height = `${ta.scrollHeight}px`;
+      };
 
       // Debounced live write; flush on blur. Both go through the store, which
       // reloads + emits — the resulting onChange triggers a re-render.
@@ -319,7 +375,12 @@ export class MarginaliaAsideView extends ItemView {
         COMMENT_DEBOUNCE_MS,
         true,
       );
-      ta.addEventListener('input', () => write(ta.value));
+      ta.addEventListener('input', () => {
+        autosize();
+        write(ta.value);
+      });
+      autosize();
+      ta.focus();
       ta.addEventListener('blur', () => {
         write.cancel();
         const next = ta.value;
@@ -338,16 +399,24 @@ export class MarginaliaAsideView extends ItemView {
       });
     };
 
-    view.addEventListener('click', () => {
+    view.addEventListener('click', (e) => {
+      // Editing the comment must NOT also trigger the card's jump-to-source. The
+      // card's click listener runs on bubble and decides by `target.closest(
+      // '.mrg-card-comment')`; but `beginEdit()` empties this view first, which
+      // detaches the original click target — so that ancestor check would miss
+      // and the card would jump (stealing focus to the editor). Stop the event so
+      // the card never sees it.
+      e.stopPropagation();
       // Don't restart an edit if a textarea is already mounted.
       if (!view.querySelector('textarea')) beginEdit();
     });
+    return beginEdit;
   }
 
-  /** Render the comment as markdown (or the empty placeholder via CSS :empty). */
+  /** Render the comment as markdown; leaves the slot empty (CSS-collapsed) if none. */
   private paintComment(view: HTMLElement, sourcePath: string, comment: string): void {
     view.empty();
-    if (comment.trim().length === 0) return; // CSS :empty shows the placeholder.
+    if (comment.trim().length === 0) return; // empty slot collapses via CSS `:empty`.
     void MarkdownRenderer.render(this.deps.app, comment, view, sourcePath, this);
   }
 
@@ -440,7 +509,7 @@ export class MarginaliaAsideView extends ItemView {
   /** A trash-icon button that deletes the annotation from the sidecar. */
   private renderDeleteButton(footer: HTMLElement, sourcePath: string, id: string): void {
     const button = footer.createEl('button', {
-      cls: 'mrg-delete-button',
+      cls: 'mrg-delete-button clickable-icon',
       attr: { type: 'button', 'aria-label': 'Delete annotation' },
       title: 'Delete annotation',
     });

@@ -239,6 +239,35 @@ When adding a module, decide its zone first. If it can be pure, make it pure.
     source re-resolution needed — the block ref is in the file). The link-string builders are
     pure + unit-tested (`anno-link.test.ts`); the runtime nav/clipboard is not (convention).
     Both injected through `AsideDeps` (`openSidecar`/`copyReference`), like `jumpTo`.
+  - **Icon-button styling (toolbar comment/delete + card copy/open/delete).** All action
+    icons wear Obsidian's own **`.clickable-icon`** (added to the class list) — flat/transparent
+    at rest so the glyph blends into the panel, with the standard hover surface only on hover.
+    **Don't hand-roll the button chrome**: a bare `<button>` gets a default surface/shadow that
+    reads as a "floating" button, which `.clickable-icon` is what suppresses (theme-proof).
+    `styles.css` adds only three things on top: size (sidebar **24px**, toolbar **20px** — the
+    floating bar must stay compact and level with the 18px swatches), 16px glyphs, and delete's
+    **red icon identity** (`--text-error` at rest *and* hover — hover adds only the normal
+    surface, never a red wash). Convention: **round swatch = pick a color; square clickable-icon
+    = an action.** The toolbar is `display:flex; align-items:center` (so the 18px swatches center
+    against the taller buttons) with a single `.mrg-sep` hairline between the swatch group and the
+    actions (not a per-button border). `.mrg-sep` is shared with the card footer. Verified on real
+    Obsidian via screenshots.
+  - **Card content & footer layout.** The **quote** renders as Markdown (`paintQuote` →
+    `MarkdownRenderer`) so bold/italic/code/links show styled — painted with an **empty
+    `sourcePath`** on purpose: `MarkdownRenderer.render` runs the whole post-processor pipeline
+    (incl. our reading-mode highlighter), and the quote text *is* an annotation, so a real path
+    re-wraps it in its highlight color here (the color already shows via border + swatch). Quote
+    links are inert (`pointer-events:none`) so a click anywhere still jumps. The **comment** slot
+    collapses entirely when empty (CSS `:empty { display:none }` — the old "Add a comment…"
+    placeholder is gone), keeping cards compact; a footer **comment button** (`message-square`,
+    accent-tinted via `.mrg-has-comment` when a note exists) opens the inline editor, and clicking
+    an existing rendered comment still edits it. **That comment click must `e.stopPropagation()`**:
+    `beginEdit` empties the slot, detaching the click target, so the card's bubble-phase
+    `closest('.mrg-card-comment')` check would miss and fire jump-to-source (stealing focus to the
+    editor) — verified bite-proof on real Obsidian (neutralize→fail). The editor **auto-grows** to
+    its content (`height = scrollHeight` on mount + each input; CSS `overflow:hidden; resize:none;
+    min-height`). Footer order left→right is `[color · comment] │ [copy · open · delete]` then the
+    status mark, which keeps `margin-left:auto` to pin it to the right.
   - **Cards are ordered by document position**, not sidecar/file order (the sidecar binds
     records by id, which need not track the document). The aside's `render()` sorts each
     pass by the live anchored `range.from`; orphans (no range) sink to the end keeping

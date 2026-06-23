@@ -119,13 +119,29 @@
 }
 
 .mrg-card-quote {
-  font-style: italic;
   color: var(--text-normal);
   border-left: 2px solid var(--background-modifier-border);
   padding-left: 8px;
   margin-bottom: 6px;
-  white-space: pre-wrap;
   cursor: pointer; /* clicking the card jumps to the highlight */
+}
+
+/* Quote + comment are Markdown-rendered; strip the renderer's outer block margins
+   so each preview stays tight in the compact card. */
+.mrg-card-quote > :first-child,
+.mrg-card-comment > :first-child {
+  margin-top: 0;
+}
+
+.mrg-card-quote > :last-child,
+.mrg-card-comment > :last-child {
+  margin-bottom: 0;
+}
+
+/* Links in the quote render styled but are inert — a click anywhere on the quote
+   jumps to the highlight (the card's job) rather than navigating the link. */
+.mrg-card-quote a {
+  pointer-events: none;
 }
 
 .mrg-card-comment {
@@ -133,16 +149,20 @@
   color: var(--text-normal);
 }
 
-.mrg-card-comment:empty::before {
-  content: 'Add a comment…';
-  color: var(--text-faint);
+/* No comment → the slot collapses entirely (the footer button adds one). */
+.mrg-card-comment:empty {
+  display: none;
 }
 
-/* The inline comment editor spans the full card width. */
+/* The inline comment editor spans the full card width and auto-grows to fit its
+   content (height is driven by JS; `overflow: hidden` keeps scrollHeight honest
+   and hides the scrollbar, `min-height` is the floor for a short note). */
 .mrg-card-comment-input {
   width: 100%;
   box-sizing: border-box;
-  resize: vertical;
+  resize: none;
+  overflow: hidden;
+  min-height: 3.6em;
   font-family: inherit;
   font-size: var(--font-ui-small);
 }
@@ -150,7 +170,7 @@
 .mrg-card-footer {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   margin-top: 8px;
 }
 
@@ -211,37 +231,58 @@
   outline-offset: 1px;
 }
 
-/* Card action icons (copy reference, open in annotations file): unobtrusive,
-   brighten to the normal text color on hover. */
-.mrg-icon-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 2px;
-  color: var(--text-muted);
-  background: transparent;
-  box-shadow: none;
-  cursor: pointer;
+/* ── Icon action buttons ────────────────────────────────────────────────
+   The selection toolbar (comment / delete) and the sidebar card footer (copy
+   reference / open in file / delete) all wear Obsidian's own `.clickable-icon`:
+   flat and transparent at rest so the glyph blends into the panel, with the
+   standard soft surface appearing only on hover. We add just three things — a
+   compact size, uniform glyphs, and delete's red identity (the round color
+   swatches stay reserved for "pick a color"). */
+.mrg-icon-button,
+.mrg-delete-button,
+.mrg-toolbar-comment,
+.mrg-toolbar-delete {
+  padding: 0;
 }
 
-.mrg-icon-button:hover {
-  color: var(--text-normal);
-}
-
-/* Delete button: an unobtrusive trash icon that reddens on hover. */
+/* Sidebar card footer: roomy 24px targets (the footer already centers them). */
+.mrg-icon-button,
 .mrg-delete-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 2px;
-  color: var(--text-muted);
-  background: transparent;
-  box-shadow: none;
-  cursor: pointer;
+  width: 24px;
+  height: 24px;
 }
 
-.mrg-delete-button:hover {
+/* Selection toolbar: tighter, so the floating bar stays compact and the buttons
+   sit level with the 18px color swatches (the toolbar centers every item). */
+.mrg-toolbar-comment,
+.mrg-toolbar-delete {
+  width: 20px;
+  height: 20px;
+}
+
+/* Crisp, uniform glyphs across every icon button. */
+.mrg-icon-button .svg-icon,
+.mrg-delete-button .svg-icon,
+.mrg-toolbar-comment .svg-icon,
+.mrg-toolbar-delete .svg-icon {
+  width: 16px;
+  height: 16px;
+}
+
+/* Delete carries its meaning in the icon color — red at rest and on hover.
+   Hover adds only the standard `.clickable-icon` surface, never a red wash. */
+.mrg-delete-button,
+.mrg-delete-button:hover,
+.mrg-toolbar-delete,
+.mrg-toolbar-delete:hover {
   color: var(--text-error);
+}
+
+/* Comment button tints to the accent when the card already has a note, an
+   at-a-glance "this highlight is annotated" signal (kept on hover too). */
+.mrg-has-comment,
+.mrg-has-comment:hover {
+  color: var(--text-accent);
 }
 
 /* --- Selection toolbar (§8.2): floats next to a non-empty editor selection. */
@@ -250,6 +291,7 @@
   position: fixed;
   z-index: var(--layer-popover, 30);
   display: flex;
+  align-items: center;
   gap: 4px;
   padding: 4px 6px;
   border-radius: 7px;
@@ -279,59 +321,18 @@
   outline-offset: 1px;
 }
 
-/* Delete button in the toolbar's edit mode: a trash icon that reddens on hover. */
-.mrg-toolbar-delete {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 18px;
-  padding: 0;
-  margin-left: 2px;
-  color: var(--text-muted);
-  background: transparent;
-  border: none;
-  border-left: 1px solid var(--background-modifier-border);
-  border-radius: 0;
-  box-shadow: none;
-  cursor: pointer;
+/* A vertical hairline that groups buttons in a flex bar — used in the selection
+   toolbar (swatches | actions) and the aside card footer (color/comment | copy/
+   open/delete). Stretches to the row height, inset slightly top/bottom. */
+.mrg-sep {
+  align-self: stretch;
+  width: 1px;
+  margin: 2px 3px;
+  background: var(--background-modifier-border);
 }
 
-.mrg-toolbar-delete:hover {
-  color: var(--text-error);
-}
-
-.mrg-toolbar-delete .svg-icon {
-  width: 15px;
-  height: 15px;
-}
-
-/* Comment button in the toolbar's edit mode: an icon that opens the inline editor. */
-.mrg-toolbar-comment {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 18px;
-  padding: 0;
-  margin-left: 2px;
-  color: var(--text-muted);
-  background: transparent;
-  border: none;
-  border-left: 1px solid var(--background-modifier-border);
-  border-radius: 0;
-  box-shadow: none;
-  cursor: pointer;
-}
-
-.mrg-toolbar-comment:hover {
-  color: var(--text-normal);
-}
-
-.mrg-toolbar-comment .svg-icon {
-  width: 15px;
-  height: 15px;
-}
+/* The toolbar's button glyphs/sizing come from the shared icon-button family
+   above; only their layout context (the floating bar) differs. */
 
 /* Comment-editing layout: the toolbar becomes a roomy box for the textarea. */
 .mrg-selection-toolbar.mrg-toolbar-commenting {

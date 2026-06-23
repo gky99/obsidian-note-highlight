@@ -256,9 +256,14 @@ export class SelectionToolbar {
     }
 
     if (state.kind === 'edit') {
+      // One hairline between the color swatches and the action buttons.
+      const sep = this.doc.createElement('div');
+      sep.className = 'mrg-sep';
+      el.appendChild(sep);
+
       const comment = this.doc.createElement('button');
       comment.type = 'button';
-      comment.className = 'mrg-toolbar-comment';
+      comment.className = 'mrg-toolbar-comment clickable-icon';
       const label = state.target.comment.trim().length > 0 ? 'Edit comment' : 'Add comment';
       comment.title = label;
       comment.setAttribute('aria-label', label);
@@ -271,7 +276,7 @@ export class SelectionToolbar {
 
       const del = this.doc.createElement('button');
       del.type = 'button';
-      del.className = 'mrg-toolbar-delete';
+      del.className = 'mrg-toolbar-delete clickable-icon';
       del.title = 'Delete highlight';
       del.setAttribute('aria-label', 'Delete highlight');
       setIcon(del, 'trash-2');
