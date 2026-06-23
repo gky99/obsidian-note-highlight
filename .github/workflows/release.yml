@@ -10,8 +10,13 @@ name: Release
 on:
   push:
     branches: [master]
-    paths: ['manifest.json']
-  workflow_dispatch: {} # allow a manual re-run for the current manifest version
+    # Fire on a version bump; also on edits to this workflow so a fix re-runs it.
+    # The "already released?" gate below is the real guard — it publishes only when
+    # the manifest version has no tag yet, so workflow-only pushes just no-op.
+    paths:
+      - 'manifest.json'
+      - '.github/workflows/release.yml'
+  workflow_dispatch: {} # allow a manual run for the current manifest version
 
 permissions:
   contents: write # create the tag + release
@@ -58,7 +63,7 @@ jobs:
         if: steps.gate.outputs.release == 'true'
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22 # pnpm 11 requires Node >= 22.13
           cache: pnpm
 
       - name: Install dependencies
