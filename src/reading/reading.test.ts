@@ -136,6 +136,66 @@ describe('makeReadingHighlighter', () => {
     expect(block2.querySelector('.mrg-highlight')).toBeNull();
   });
 
+  // --- Immersive Translate interop (CLAUDE.md / Design.md §7.2) -------------
+  // The Immersive Translate plugin injects translated text into the reading-mode
+  // DOM as `<font class="immersive-translate-target-wrapper">` nodes, appended
+  // after each original chunk. With its `selectors: [".markdown-reading-view *"]`
+  // config a translation can land *between* the text nodes a quote spans, which
+  // used to break `concat.indexOf(needle)` and silently drop the highlight. The
+  // painter now skips those foreign nodes so it matches only the note's own text.
+
+  it('paints an inline-spanning quote even when a translation is interleaved (Immersive Translate)', () => {
+    // Faithful Immersive Translate DOM: original text nodes wrapped in bare
+    // <font>, a translation <font.immersive-translate-target-wrapper> appended
+    // after the <strong> *inside* it, and another after the block. The translation
+    // sits between "brown fox" and " jumps" — the two nodes the quote spans.
+    const paint = makeReadingHighlighter(fakeStore([anchored('The quick **brown fox** jumps', 0, 0)]));
+    const el = richParagraph(
+      '<font>The quick </font>' +
+        '<strong><font>brown fox</font>' +
+        '<font class="immersive-translate-target-wrapper">棕色狐狸</font></strong>' +
+        '<font> jumps over the lazy dog.</font>' +
+        '<font class="immersive-translate-target-wrapper">敏捷的棕色狐狸跳过懒狗。</font>',
+    );
+    paint(el, ctx(null));
+
+    const spans = el.querySelectorAll('.mrg-highlight');
+    const painted = Array.from(spans)
+      .map((s) => s.textContent)
+      .join('');
+    expect(painted).toBe('The quick brown fox jumps');
+    // The translation must never be highlighted, and must stay intact in the DOM.
+    spans.forEach((s) => expect(s.textContent).not.toMatch(/[一-鿿]/));
+    expect(el.querySelectorAll('.immersive-translate-target-wrapper').length).toBe(2);
+  });
+
+  it('matches the original, not a translation that echoes the same token', () => {
+    // The translation keeps the English proper noun "Obsidian" verbatim. The quote
+    // must paint the original occurrence, never the one inside the translation.
+    const SRC = 'I use Obsidian daily.';
+    const paint = makeReadingHighlighter(fakeStore([anchored('Obsidian', 6, 14)]));
+    const el = richParagraph(
+      'I use <font>Obsidian</font> daily.' +
+        '<font class="immersive-translate-target-wrapper">我每天使用 Obsidian。</font>',
+    );
+    paint(el, ctx({ text: SRC, lineStart: 0, lineEnd: 0 }));
+
+    const spans = el.querySelectorAll('.mrg-highlight');
+    expect(spans.length).toBe(1);
+    expect(spans[0].textContent).toBe('Obsidian');
+    // The painted span is the original, outside any translation wrapper.
+    expect(spans[0].closest('.immersive-translate-target-wrapper')).toBeNull();
+  });
+
+  it('still paints a plain quote when the block-level translation is appended (no regression)', () => {
+    const paint = makeReadingHighlighter(fakeStore([anchored('brown fox', 10, 19)]));
+    const el = richParagraph(
+      `${SENTENCE}<br><font class="immersive-translate-target-wrapper">敏捷的棕色狐狸跳跃。</font>`,
+    );
+    paint(el, ctx({ text: SENTENCE, lineStart: 0, lineEnd: 0 }));
+    expect(el.querySelector('.mrg-highlight')?.textContent).toBe('brown fox');
+  });
+
   it('does not paint orphaned annotations', () => {
     const orphan = {
       annotation: { id: 'o', quote: 'brown fox', comment: '', record: { id: 'o', status: 'exact' } },

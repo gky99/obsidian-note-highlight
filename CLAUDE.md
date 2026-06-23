@@ -379,6 +379,24 @@ slice is the whole quote). The `getSectionInfo`-null path still falls back to wh
 search. Offset-accurate reading-mode highlighting remains a **non-goal** (Design.md §7.2);
 CM6 is the authoritative path. Covered by `reading.test.ts` ("spans two block elements").
 
+**Translation-overlay interop — fixed (2026-06-23).** The *Immersive Translate* plugin
+injects translated text into the reading-mode DOM as `<font class="immersive-translate-target-
+wrapper">` nodes (and `immersive-translate-target-*` variants) appended after each original
+chunk; with its `selectors: [".markdown-reading-view *"]` config a translation can land
+*between* the text nodes a quote spans. The painter matches a quote against the
+**concatenation of an element's text nodes** (`highlightFirstMatch`), so interleaved
+translation text broke contiguity and the highlight silently vanished — an inline-spanning
+quote (`**bold**`, links) was the common casualty. (Reported as "the translated text after the
+original breaks the before/after check" — but the resolver's before/after context runs on
+*source bytes* and is unaffected; the bug was purely in the DOM painter.) Fix: the painter's
+`TreeWalker` now skips text inside any element whose class starts with `immersive-translate-
+target` (`isSkippedContext`), exactly as it already skips `.mrg-highlight` — so it only ever
+matches the note's own rendered content. Original text nodes never carry that class (the plugin
+wraps them in a bare `<font>`), so nothing else changes. Covered by `reading.test.ts`
+("interleaved" / "echoes the same token" / block-level no-regression); verified bite-proof
+(fails when the skip is neutralized). Not e2e-tested — the live SDK needs network and can't run
+in the offline harness, and this is pure DOM-matching logic (happy-dom territory).
+
 ### Sidecar comment format + parse coupling — RESOLVED (2026-06-20)
 Reworked this session (see Design.md §5.1, §5.4, §10 #11, and the invariant bullets above).
 Two distinct problems were conflated under "rendering breaks when the file structure

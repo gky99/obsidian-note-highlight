@@ -37,6 +37,23 @@ const HIGHLIGHT_CLASS = 'mrg-highlight';
 const ANNO_MARKER_CLASS = 'mrg-anno-marker';
 
 /**
+ * Class-name prefix the Immersive Translate plugin stamps on the elements that
+ * hold the *translated* text it injects into reading mode (e.g.
+ * `immersive-translate-target-wrapper`, `immersive-translate-target-translation-
+ * block-wrapper`). That text is a foreign overlay, not part of the source note:
+ * with the plugin's `selectors: [".markdown-reading-view *"]` config it injects a
+ * translation right after each original chunk — including *inside* inline
+ * elements — so a translation can land between the text nodes a quote spans. The
+ * painter matches a quote against the concatenation of an element's text nodes
+ * ({@link highlightFirstMatch}); if translated text is interleaved there, the
+ * quote is no longer contiguous and nothing paints. So we treat translation nodes
+ * exactly like an existing highlight — skipped — and only ever match the note's
+ * own rendered content. (Original text nodes never carry this class; the plugin
+ * wraps them in a bare `<font>`.)
+ */
+const TRANSLATION_TARGET_PREFIX = 'immersive-translate-target';
+
+/**
  * Code-block processor body for `registerMarkdownCodeBlockProcessor('anno', …)`.
  *
  * Hides the machine `anno` block in reading mode. Renders an optional tiny inert
@@ -164,7 +181,7 @@ function highlightFirstMatch(root: HTMLElement, needle: string, annotation: Anno
   const doc = root.ownerDocument;
   const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
     acceptNode(node: Node): number {
-      if (isInsideHighlight(node)) return NodeFilter.FILTER_REJECT;
+      if (isSkippedContext(node)) return NodeFilter.FILTER_REJECT;
       return node.nodeValue ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
     },
   });
@@ -196,11 +213,21 @@ function highlightFirstMatch(root: HTMLElement, needle: string, annotation: Anno
   return wrapped;
 }
 
-/** Is `node` (or an ancestor up to nothing) already inside a `.mrg-highlight`? */
-function isInsideHighlight(node: Node): boolean {
+/**
+ * Is `node` inside an element the painter must not match against — an existing
+ * `.mrg-highlight` (never re-wrap) or a foreign translation overlay (Immersive
+ * Translate; see {@link TRANSLATION_TARGET_PREFIX})? Walks ancestors once.
+ */
+function isSkippedContext(node: Node): boolean {
   let cur: Node | null = node.parentNode;
   while (cur && cur.nodeType === Node.ELEMENT_NODE) {
-    if ((cur as Element).classList?.contains(HIGHLIGHT_CLASS)) return true;
+    const classList = (cur as Element).classList;
+    if (classList) {
+      if (classList.contains(HIGHLIGHT_CLASS)) return true;
+      for (let i = 0; i < classList.length; i++) {
+        if (classList[i].startsWith(TRANSLATION_TARGET_PREFIX)) return true;
+      }
+    }
     cur = cur.parentNode;
   }
   return false;
