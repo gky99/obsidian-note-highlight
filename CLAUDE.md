@@ -23,6 +23,26 @@ Always run `pnpm typecheck` after touching Obsidian/CM6-bound code — it is che
 against the real `obsidian` + `@codemirror/*` types and is the only automated signal
 for layers that can't be unit-tested.
 
+## Releasing
+
+`.github/workflows/release.yml` auto-publishes a GitHub Release **on a version bump**.
+To cut a release: bump `version` in `manifest.json` (add the matching `"<version>":
+"<minAppVersion>"` line to `versions.json`; `package.json` `version` is kept in sync for
+hygiene), commit, and push to `master`. The workflow then `pnpm build`s and publishes a
+release **tagged with the exact version, no `v` prefix** (Obsidian/BRAT match the tag to
+`manifest.json` verbatim), attaching the three assets Obsidian needs: `main.js`,
+`manifest.json`, `styles.css` (`main.js` is gitignored, so it's built fresh in CI).
+
+- **The tag-existence check is the real guard, not the path filter.** It triggers on a push
+  touching `manifest.json` *or* the workflow file, then skips unless the manifest version has
+  no tag yet — so it's idempotent (re-runs/workflow edits no-op) and `workflow_dispatch` can
+  re-fire it. `pnpm test` + `pnpm build` gate the publish (a red test or typecheck blocks it).
+- **CI Node must be ≥ 22.13** — `pnpm/action-setup@v4` installs pnpm 11, which refuses older
+  Node (`node:sqlite` crash in setup-node's pnpm cache step). Pinned to `node-version: 22`.
+- Needs repo **Settings → Actions → General → Workflow permissions = read/write** for the
+  default `GITHUB_TOKEN` to create the tag + release (the workflow also requests
+  `permissions: contents: write`).
+
 ## Architecture: pure core vs. Obsidian runtime
 
 The single most important rule. Two zones:
