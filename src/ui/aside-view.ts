@@ -23,6 +23,7 @@ import {
 import type { AnnotationStore, ResolvedAnnotation } from '@/store/store';
 import type { MarginaliaSettings } from '@/settings';
 import { renderColor, colorLabel, normalizeColorValue } from '@/color';
+import { annotationsSignature, sortByPosition } from './aside-signature';
 import { confirm } from './confirm';
 
 /** Stable view type for `registerView` / `getViewType`. */
@@ -57,6 +58,14 @@ export class MarginaliaAsideView extends ItemView {
   /** The open color-picker popup (if any) and its teardown, so we can dismiss it. */
   private colorPopup: HTMLElement | null = null;
   private colorPopupCleanup: (() => void) | null = null;
+  /**
+   * Signature of the cards currently in the DOM, and the source they belong to.
+   * `render()` skips the (destructive) rebuild when the signature is unchanged —
+   * so a redundant same-file sync (e.g. the `active-leaf-change` fired by clicking
+   * into the panel) never resets scroll or destroys the element being clicked.
+   */
+  private renderedSig: string | null = null;
+  private renderedPath: string | null = null;
 
   constructor(leaf: WorkspaceLeaf, deps: AsideDeps) {
     super(leaf);
@@ -88,6 +97,9 @@ export class MarginaliaAsideView extends ItemView {
     this.unsubscribe = null;
     this.clearPulseTimers();
     this.closeColorPopup();
+    // Obsidian empties the view on close; force a fresh render if it reopens.
+    this.renderedSig = null;
+    this.renderedPath = null;
   }
 
   /** Point the panel at a source file (path) and re-render its cards; null clears. */
@@ -198,17 +210,32 @@ export class MarginaliaAsideView extends ItemView {
 
   /** Full re-render of the panel. Never throws. */
   private render(): void {
-    this.clearPulseTimers();
-    this.closeColorPopup(); // a stale popup would point at a destroyed card
-    const root = this.contentEl;
-    root.empty();
-    const aside = root.createDiv({ cls: 'mrg-aside' });
-
     const path = this.sourcePath;
     // Order cards by where they sit in the source (top → bottom), not by sidecar
     // file order — the sidecar collects records by id, which need not track the
     // document. Orphans (no live range) sink to the end.
     const resolved = path ? sortByPosition(this.deps.store.getResolved(path)) : [];
+
+    // Skip the destructive rebuild when the cards would be identical. A redundant
+    // rebuild resets scroll and destroys the element under an in-progress click —
+    // the "first click does nothing" + "scroll jumps to top" bugs — and the
+    // same-file `active-leaf-change` from clicking into the panel lands here.
+    const sig = `${path ?? ''}\n${annotationsSignature(resolved)}`;
+    if (sig === this.renderedSig) return;
+
+    // Preserve the panel's scroll across a *same-file* rebuild (a recolor, delete,
+    // or comment edit) so the list isn't yanked back to the top. A real file switch
+    // (different path) intentionally starts at the top.
+    const samePath = path === this.renderedPath;
+    const prevScroll = this.contentEl.querySelector<HTMLElement>('.mrg-aside')?.scrollTop ?? 0;
+
+    this.clearPulseTimers();
+    this.closeColorPopup(); // a stale popup would point at a destroyed card
+    const root = this.contentEl;
+    root.empty();
+    const aside = root.createDiv({ cls: 'mrg-aside' });
+    this.renderedSig = sig;
+    this.renderedPath = path;
 
     if (!path || resolved.length === 0) {
       aside.createDiv({
@@ -218,16 +245,38 @@ export class MarginaliaAsideView extends ItemView {
       return;
     }
 
+    // Collect the async markdown renders so scroll is restored after heights settle.
+    const pending: Promise<unknown>[] = [];
     for (const item of resolved) {
       try {
-        this.renderCard(aside, path, item);
+        this.renderCard(aside, path, item, pending);
       } catch {
         // A single malformed annotation must not blank the whole panel.
       }
     }
+
+    if (samePath && prevScroll > 0) this.restoreScroll(aside, prevScroll, pending);
   }
 
-  private renderCard(parent: HTMLElement, sourcePath: string, item: ResolvedAnnotation): void {
+  /**
+   * Restore the panel's scroll offset after a same-file rebuild. The card quotes
+   * and comments render markdown asynchronously and grow the panel, so a single
+   * synchronous assignment would be clamped to the not-yet-grown height — set it
+   * again once every markdown render has settled.
+   */
+  private restoreScroll(aside: HTMLElement, top: number, pending: Promise<unknown>[]): void {
+    aside.scrollTop = top;
+    void Promise.all(pending).then(() => {
+      aside.scrollTop = top;
+    });
+  }
+
+  private renderCard(
+    parent: HTMLElement,
+    sourcePath: string,
+    item: ResolvedAnnotation,
+    pending?: Promise<unknown>[],
+  ): void {
     const { annotation, result } = item;
     const orphaned = result.status === 'orphaned';
     const color = normalizeColorValue(annotation.record.color);
@@ -250,13 +299,19 @@ export class MarginaliaAsideView extends ItemView {
     // Quote — rendered as Markdown so bold/italic/links/code show styled.
     // Display-only (links are inert via CSS) so a click anywhere still jumps.
     const quoteEl = card.createDiv({ cls: 'mrg-card-quote' });
-    this.paintQuote(quoteEl, annotation.quote);
+    this.paintQuote(quoteEl, annotation.quote, pending);
 
     // Comment — a slot that holds the rendered note (and the inline editor). It
     // collapses entirely when empty (CSS `:empty`); the footer comment button
     // opens the editor. `beginEdit` is shared by the slot click and that button.
     const hasComment = annotation.comment.trim().length > 0;
-    const beginCommentEdit = this.renderComment(card, sourcePath, annotation.id, annotation.comment);
+    const beginCommentEdit = this.renderComment(
+      card,
+      sourcePath,
+      annotation.id,
+      annotation.comment,
+      pending,
+    );
 
     // Footer (left → right): [color · comment] │ [copy · open · delete] … status.
     // The editing controls (color, comment) group on the left, a vertical bar
@@ -280,8 +335,10 @@ export class MarginaliaAsideView extends ItemView {
    * painter re-wrap it in its highlight color here. The color already shows via
    * the card border + swatch, and quote links are inert (CSS), so '' is safe.
    */
-  private paintQuote(el: HTMLElement, quote: string): void {
-    void MarkdownRenderer.render(this.deps.app, quote, el, '', this);
+  private paintQuote(el: HTMLElement, quote: string, pending?: Promise<unknown>[]): void {
+    const p = MarkdownRenderer.render(this.deps.app, quote, el, '', this);
+    if (pending) pending.push(p);
+    else void p;
   }
 
   /** Footer button that opens the inline comment editor; tinted when a note exists. */
@@ -343,11 +400,12 @@ export class MarginaliaAsideView extends ItemView {
     sourcePath: string,
     id: string,
     comment: string,
+    pending?: Promise<unknown>[],
   ): () => void {
     const view = card.createDiv({ cls: 'mrg-card-comment' });
     view.setAttribute('role', 'textbox');
     view.setAttribute('tabindex', '0');
-    this.paintComment(view, sourcePath, comment);
+    this.paintComment(view, sourcePath, comment, pending);
 
     const beginEdit = (): void => {
       const open = view.querySelector('textarea');
@@ -414,10 +472,17 @@ export class MarginaliaAsideView extends ItemView {
   }
 
   /** Render the comment as markdown; leaves the slot empty (CSS-collapsed) if none. */
-  private paintComment(view: HTMLElement, sourcePath: string, comment: string): void {
+  private paintComment(
+    view: HTMLElement,
+    sourcePath: string,
+    comment: string,
+    pending?: Promise<unknown>[],
+  ): void {
     view.empty();
     if (comment.trim().length === 0) return; // empty slot collapses via CSS `:empty`.
-    void MarkdownRenderer.render(this.deps.app, comment, view, sourcePath, this);
+    const p = MarkdownRenderer.render(this.deps.app, comment, view, sourcePath, this);
+    if (pending) pending.push(p);
+    else void p;
   }
 
   /**
@@ -538,18 +603,6 @@ export const DELETE_PROMPT = {
 };
 
 // --- pure helpers (no obsidian runtime) -----------------------------------
-
-/**
- * Order resolved annotations by their live document position (start offset),
- * ascending. Orphaned annotations have no range and sink to the end. Ties and
- * orphans keep their relative sidecar order (Array#sort is stable, ES2019+), so
- * one-highlight-per-passage means anchored ties don't actually occur.
- */
-function sortByPosition(resolved: ResolvedAnnotation[]): ResolvedAnnotation[] {
-  const start = (r: ResolvedAnnotation): number =>
-    r.result.status === 'anchored' ? r.result.range.from : Number.POSITIVE_INFINITY;
-  return [...resolved].sort((a, b) => start(a) - start(b));
-}
 
 /** Apply a color (built-in token or hex) to a card's left border. */
 function paintCardColor(card: HTMLElement, color: string): void {
