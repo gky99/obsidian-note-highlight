@@ -62,7 +62,9 @@ The single most important rule. Two zones:
 **Obsidian runtime — typechecked, NOT unit-tested (needs a live vault).**
 - `src/store/` — load + live re-resolve + atomic sidecar write-back + highlight creation. The runtime hub.
 - `src/editor/` — CM6 extension: `Decoration.mark` highlights (mapped through `RangeSet.map`), `anno`-block hiding, flash, reverse-nav.
-- `src/reading/` — reading-mode processors (anno hider + best-effort highlighter).
+- `src/reading/` — reading-mode processors (anno hider + best-effort highlighter) and the
+  post-jump flash (`flash.ts#flashReadingHighlights` — toggles `mrg-flash` on the painted
+  spans, since reading mode has no CM6 decoration; pure, happy-dom-tested).
 - `src/ui/` — aside `ItemView`, settings tab, and `selection-toolbar.ts` (the floating highlight palette — see below).
 - `src/navigation.ts`, `src/main.ts` — forward jump + plugin wiring.
 
@@ -316,11 +318,26 @@ When adding a module, decide its zone first. If it can be pure, make it pure.
   - **A re-render must not destroy transient foreground UI** (Design.md §14.5). The
     panel rebuilds on `render()`, which tears down the open color popup / focused comment
     editor. `refresh()` and `setSourceFile` therefore skip re-rendering while `isBusy()`
-    (`isEditing() || colorPopup != null`), and `setSourceFile` skips a *same-file* render
-    entirely. Without this, the `active-leaf-change` that fires when you click from the
-    editor into the panel (→ `syncActiveFile` → `setSourceFile`+`store.load`, both of which
-    `render()`) closed the color popup the instant it opened. A real file switch still
-    renders.
+    (`isEditing() || colorPopup != null`). Without this, the `active-leaf-change` that fires
+    when you click from the editor into the panel (→ `syncActiveFile` → `setSourceFile`+
+    `store.load`, both of which `render()`) closed the color popup the instant it opened. A
+    real file switch still renders.
+  - **`render()` is gated by a content signature; it does NOT rebuild when nothing changed**
+    (Design.md §14.5, fixed 2026-06-26). `store.load` emits onChange *unconditionally*, and a
+    same-file `active-leaf-change` (clicking into the panel) drives a redundant sync — so
+    `render()` fired even when the cards were identical, rebuilding the DOM mid-click. That
+    rebuild (a) **ate the click** — the button under the cursor was destroyed between mousedown
+    and mouseup, so the *first* click into the panel did nothing — and (b) **reset scroll to the
+    top** (a fresh `.mrg-aside` at `scrollTop 0`). Fix: `render()` computes
+    `annotationsSignature(resolved)` (pure, `src/ui/aside-signature.ts`: id/color/comment/status/
+    method/position/sidecar in document order) and returns early when it equals the last render's.
+    On a *real* same-file rebuild (recolor/delete/comment) it **restores the prior `scrollTop`**
+    after the async card markdown settles (`restoreScroll` awaits the `MarkdownRenderer` promises,
+    else the offset clamps to the not-yet-grown height). This subsumes the old same-file skip;
+    `isBusy()` still guards the editing case (where data *did* change but the editor must survive).
+    The card-click handler already routes footer/comment clicks to their own handlers and only
+    jumps from empty areas — the bug was purely the rebuild eating the event. Guarded by
+    `aside-click-scroll.e2e.ts` (teeth-checked).
 
 ## Web Highlights import (`src/import/`, added 2026-06-20)
 
@@ -536,6 +553,14 @@ Core is done and tested. The runtime layers build and typecheck; the selection t
 custom palette, custom save location, and aside card controls are in. Recent work, newest
 first:
 
+- **Obvious post-jump flash, both modes** (Design.md §8.1): jumping to a highlight now shows
+  a soft accent glow *inside* it — one ~1.67s flash that fades in, holds, then fades out
+  (`mrg-flash`) — so it's clear *where* it landed —
+  an **inset** box-shadow fill (`color-mix` over `--interactive-accent`) that layers over any
+  highlight color (not an outer ring, not a hue change). Reading mode previously had **no**
+  flash; it now toggles `mrg-flash` on the painted `.mrg-highlight[data-anno-id]` spans
+  (`src/reading/flash.ts`, retried while the section paints), while edit/Live-Preview keeps the
+  CM6 flash decoration. Unit-tested (`reading/flash.test.ts`) + in-vault `jump-flash.e2e.ts`.
 - **Sort highlights command** (Design.md §5.7): "Sort highlights in annotation file" reorders a
   sidecar's quote units into **source reading order, within each heading section** — every heading
   level is a fixed divider (conservative nesting), `anno` blocks + custom content stay put, a

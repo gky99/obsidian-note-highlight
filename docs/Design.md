@@ -373,12 +373,17 @@ jumpTo(anno):
   open sourceFile
   if mode == preview:                          # reading mode (§8.1 note)
     currentMode.applyScroll(lineAt(range.from))
+    flash painted highlight spans (mrg-flash)  # DOM, retried while painting
   else:                                         # source / Live Preview
-    setSelection(range); scrollIntoView(range, center)
-    dispatch transient flash decoration
+    setCursor(range.from); scrollIntoView(range, center)   # cursor, NOT a selection
+    dispatch transient flash decoration (mrg-flash)
 ```
 
-**Reading mode needs its own scroll.** In preview mode the CM editor is hidden, so `editor.scrollIntoView`/`setSelection` move an off-screen editor and the preview never budges — the jump silently does nothing. So `jumpToAnnotation` branches on `view.getMode()`: in preview it scrolls the active sub-view with `view.currentMode.applyScroll(line)` (line derived from the resolved offset; `applyScroll` is in line units, shared by both sub-views). The reading-mode highlight is painted by the post-processor, so there is no CM flash to dispatch. Edit/Live-Preview keeps the select-and-`scrollIntoView` path. (This is independent of orphaning — an anchored cross-block highlight resolves fine; the bug was purely the editor-only scroll.)
+**Reading mode needs its own scroll.** In preview mode the CM editor is hidden, so `editor.scrollIntoView`/`setSelection` move an off-screen editor and the preview never budges — the jump silently does nothing. So `jumpToAnnotation` branches on `view.getMode()`: in preview it scrolls the active sub-view with `view.currentMode.applyScroll(line)` (line derived from the resolved offset; `applyScroll` is in line units, shared by both sub-views). Edit/Live-Preview keeps the select-and-`scrollIntoView` path. (This is independent of orphaning — an anchored cross-block highlight resolves fine; the bug was purely the editor-only scroll.)
+
+**The post-jump flash (both modes).** A jump lands the reader somewhere new, so the target highlight gets a transient **`mrg-flash`** animation — a soft accent glow *inside* the highlight that fades in, holds, then fades out (one flash, ≈1.67 s) — to draw the eye to *where* it landed. It's an **inset** box-shadow fill (via `color-mix` over `--interactive-accent`), so it layers on top of any highlight color rather than replacing it or drawing a boxy outer ring. Two delivery mechanisms, one CSS class, mirroring how highlights themselves are painted (§7.2): in **edit/Live-Preview** it's a CM6 decoration mark over the range (`src/editor/flash.ts`, mapped across edits, cleared after the animation); in **reading mode** — which has no CodeMirror — it's the same class toggled directly on the *painted* `.mrg-highlight[data-anno-id]` spans (`src/reading/flash.ts#flashReadingHighlights`, the same elements scroll-sync reads). Reading mode paints a section as it scrolls into view, so `navigation.flashReadingMode` polls a few frames until the spans exist before flashing. Earlier this was editor-only (reading mode had no flash, so a reading-mode jump looked like nothing happened). The reading-flash helper is unit-tested (happy-dom); the wiring is verified in-vault by `test/playground/specs/jump-flash.e2e.ts` (teeth-checked).
+
+The jump deliberately **does not select** the range — it sets the *cursor* at the start. A persistent selection leaves an accent (purple) wash over the highlight long after the flash fades, which (now that the flash is also accent-toned) reads as "the flash never ends." The flash already marks where it landed, and `scrollIntoView` takes the range explicitly, so a selection is unnecessary. Guarded by `jump-no-selection.e2e.ts`.
 
 Block-pin fallback uses native `workspace.openLinkText("Source#^h1", path)`.
 
@@ -587,6 +592,25 @@ upstream guard is possible — `syncActiveFile()` could skip the reload entirely
 source path is unchanged, sparing the re-resolve on every `active-leaf-change` — but the
 panel-side `isBusy()` guard is the load-bearing fix, since `onChange` can also fire from a
 genuine background edit while a popup is open.
+
+**Follow-on (fixed 2026-06-26): the redundant rebuild also ate clicks and reset scroll.**
+The `isBusy()` guard only covers an *open popup / focused editor*. A plain click on a card
+button is not "busy", so the same redundant same-file re-sync still rebuilt the panel — and
+that rebuild, landing between a button's mousedown and mouseup, **destroyed the button being
+clicked** (so the *first* click into the panel did nothing) and created a fresh `.mrg-aside`
+at **`scrollTop 0`** (the list jumped to the top). Both are the *same* root cause as the
+popup bug — a re-render that shouldn't have happened. Fix: gate `render()` on a **content
+signature** (`annotationsSignature`, pure: id/color/comment/status/method/position/sidecar in
+document order) and return early when it's unchanged, so a redundant sync rebuilds *nothing*
+— the clicked node survives and scroll is untouched. This subsumes the same-file skip. When a
+render *is* warranted (recolor/delete/comment changed the data), the panel **restores its prior
+`scrollTop`** after the cards' async markdown settles (`restoreScroll` awaits the
+`MarkdownRenderer` promises; a synchronous restore would clamp to the not-yet-grown height).
+One-way scroll-sync (§14.6) is unaffected. The deeper lesson: a re-render is destructive not
+only to *mounted UI* but to *the in-flight interaction itself* (the pending click) and to
+*scroll position* — so "did anything actually change?" must gate the rebuild, not just "is a
+popup open?". Verified in-vault by `aside-click-scroll.e2e.ts` (node identity + scrollTop,
+teeth-checked).
 
 ### 14.6 Document-ordered cards + scroll sync (added 2026-06-20)
 
