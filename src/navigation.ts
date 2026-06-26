@@ -71,7 +71,11 @@ export async function jumpToAnnotation(
   const editor = view.editor;
   const fromPos = editor.offsetToPos(from);
   const toPos = editor.offsetToPos(to);
-  editor.setSelection(fromPos, toPos);
+  // Place the cursor at the start — do NOT select the range. A persistent selection
+  // leaves an accent (purple) wash over the highlight long after the transient flash
+  // fades (and reads as "the flash never ended"). The flash marks the range; scroll
+  // takes it explicitly, so no selection is needed.
+  editor.setCursor(fromPos);
   editor.scrollIntoView({ from: fromPos, to: toPos }, true);
 
   // The CM6 EditorView is exposed (undocumented) as `editor.cm`; flash if we can.
