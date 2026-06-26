@@ -13,8 +13,8 @@ export const addFlashEffect = StateEffect.define<{ from: number; to: number }>()
 /** Remove all flash marks. */
 export const clearFlashEffect = StateEffect.define<null>();
 
-/** Matches the `mrg-flash` keyframe in styles.css. */
-const FLASH_DURATION_MS = 1100;
+/** Must cover the `mrg-flash` CSS animation (one ≈1.67s flash) in styles.css. */
+const FLASH_DURATION_MS = 1670;
 
 const flashMark = Decoration.mark({ class: 'mrg-flash' });
 

@@ -11,6 +11,7 @@ import type { EditorView } from '@codemirror/view';
 
 import type { AnnotationStore } from '@/store/store';
 import { annoBlockSubpath, annoBlockWikilink } from '@/obsidian/anno-link';
+import { flashReadingHighlights } from '@/reading/flash';
 
 /** Optional CM6 flash, injected by the plugin from the editor extension module. */
 export type FlashFn = (view: EditorView, from: number, to: number) => void;
@@ -58,9 +59,12 @@ export async function jumpToAnnotation(
     // jump appears to do nothing. Scroll the active sub-view (the preview) to the
     // highlight's line instead. `applyScroll` takes a line number, the same unit
     // both sub-views use, so we derive it from the source offset. The reading-mode
-    // post-processor paints the highlight itself; there is no CM flash to give.
+    // post-processor paints the highlight itself (no CM decoration), so flash those
+    // painted spans, retrying briefly since the section may still be painting as it
+    // scrolls into view.
     const sourceText = await app.vault.cachedRead(file);
     view.currentMode.applyScroll(lineAtOffset(sourceText, from));
+    flashReadingMode(view.containerEl, id);
     return;
   }
 
@@ -130,6 +134,16 @@ export async function copyAnnotationReference(
   } catch {
     new Notice('Marginalia: could not copy to clipboard.');
   }
+}
+
+/**
+ * Flash the reading-mode painted highlight for `id`, retrying for a short window:
+ * `applyScroll` brings the section into view but its highlight spans may paint a
+ * frame or two later, so poll a few times until they exist (or give up).
+ */
+function flashReadingMode(container: HTMLElement, id: string, triesLeft = 8): void {
+  if (flashReadingHighlights(container, id) > 0) return;
+  if (triesLeft > 0) window.setTimeout(() => flashReadingMode(container, id, triesLeft - 1), 60);
 }
 
 /** 0-based line number containing source offset `offset` (newlines before it). */
