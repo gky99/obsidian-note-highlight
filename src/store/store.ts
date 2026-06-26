@@ -17,7 +17,14 @@ import { TFile, Notice, normalizePath, type App, type CachedMetadata } from 'obs
 
 import type { Sidecar, Annotation, AnnoRecord, SidecarFrontmatter } from '@/model/types';
 import { SCHEMA_VERSION } from '@/model/types';
-import { parseSidecar, serializeSidecar, SidecarSchemaError, type ParseIssue } from '@/sidecar';
+import {
+  parseSidecar,
+  patchSidecar,
+  serializeSidecar,
+  sortHighlights,
+  SidecarSchemaError,
+  type ParseIssue,
+} from '@/sidecar';
 import { resolve, type ResolveResult } from '@/resolver';
 import {
   buildStructure,
@@ -727,13 +734,15 @@ export class AnnotationStore {
     return fm;
   }
 
-  /** Atomic read-modify-write of an existing sidecar (§9). */
+  /**
+   * Atomic read-modify-write of an existing sidecar (§9). Patches the file **in
+   * place** ({@link patchSidecar}) so custom content (headings, prose, summaries,
+   * the on-disk `anno`-block grouping) survives the edit; only the changed/new/
+   * removed annotations are touched. Strict parse — a malformed unit throws here,
+   * refusing the write rather than clobbering.
+   */
   private async rmw(file: TFile, mutate: (s: Sidecar) => void): Promise<void> {
-    await this.app.vault.process(file, (text) => {
-      const sidecar = parseSidecar(text);
-      mutate(sidecar);
-      return serializeSidecar(sidecar);
-    });
+    await this.app.vault.process(file, (text) => patchSidecar(text, mutate));
   }
 
   /** Create a fresh sidecar at `path` annotating `sourcePath`. */
@@ -863,17 +872,46 @@ export class AnnotationStore {
     const sidecarFile = resolved ? this.fileAt(resolved.sidecarPath) : null;
     if (!(sourceFile instanceof TFile) || !sidecarFile) return;
     try {
-      await this.app.vault.process(sidecarFile, (text) => {
-        const sidecar = parseSidecar(text);
-        const a = sidecar.annotations.find((x) => x.id === id);
-        if (a) fn(a, sidecar);
-        return serializeSidecar(sidecar);
-      });
+      await this.app.vault.process(sidecarFile, (text) =>
+        patchSidecar(text, (sidecar) => {
+          const a = sidecar.annotations.find((x) => x.id === id);
+          if (a) fn(a, sidecar);
+        }),
+      );
     } catch (e) {
       new Notice(`Marginalia: failed to update sidecar — ${String(e)}`);
       throw e;
     }
     await this.load(sourceFile);
+  }
+
+  /**
+   * Reorder each of a source's sidecar files so highlights sit in **source reading
+   * order, within each heading section** (Design.md §5.7). The structure-preserving
+   * reshuffle is the pure {@link sortHighlights}; here we just supply each id's live
+   * source offset (orphans have none → they sink to the end of their section) and
+   * write each file via `vault.process`. Returns the number of files actually sorted.
+   */
+  async sortBySourcePosition(sourceFile: TFile): Promise<number> {
+    const resolved = await this.load(sourceFile);
+    const positionById = new Map<string, number>();
+    for (const r of resolved) {
+      if (r.result.status === 'anchored') positionById.set(r.annotation.id, r.result.range.from);
+    }
+    const positionOf = (id: string): number | null => positionById.get(id) ?? null;
+
+    let sorted = 0;
+    for (const file of this.sidecarsFor(sourceFile.path)) {
+      try {
+        await this.app.vault.process(file, (text) => sortHighlights(text, positionOf));
+        sorted++;
+      } catch (e) {
+        // A malformed unit makes the strict parse refuse (never clobber); skip that file.
+        new Notice(`Marginalia: couldn't sort ${file.name} — ${String(e)}`);
+      }
+    }
+    if (sorted > 0) await this.load(sourceFile);
+    return sorted;
   }
 }
 

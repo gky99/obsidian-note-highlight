@@ -51,7 +51,10 @@ The single most important rule. Two zones:
 - `src/model/` — shared data types (the contract every layer builds on).
 - `src/text/` — `normalize` (whitespace projection + index map back to true offsets), `hash` (qhash, sha-1), `locate` (reading-mode selection text → source offsets, best-effort; mirrors `reading/project`). **`locate`'s `projectSourceWithMap` must reduce links/images/wikilinks identically to `projectQuoteToText`** — its `.text` is *required* to equal `projectQuoteToText(input)` (a `locate.test.ts` invariant case enforces it across link/image/wikilink samples). Drift there silently breaks reading-mode highlight *creation*: a selection over a rendered link (`[Obsidian](url)`→`Obsidian`) projects to marker-free text but the source projection kept the brackets, so it wasn't found → "could not locate that selection in the note source" (the §7.2 reading-mode-creation bug fixed 2026-06-23).
 - `src/color.ts` — color resolution shared by every renderer: a stored color is a built-in token (`yellow`…`orange`, theme-aware CSS class) OR an arbitrary `#hex` (inline style). `renderColor()` returns `{ className?, background?, solid }`. Stored values are literal, never palette indices, so a highlight's look survives palette edits.
-- `src/sidecar/` — parse/serialize the sidecar `.md` format; round-trip-safe.
+- `src/sidecar/` — parse/serialize the sidecar `.md` format; round-trip-safe. `serialize.ts`
+  is **create-only** now; in-place edits go through `patch.ts` (`patchSidecar`, structure-
+  preserving — see the invariant below). `parse.ts` also exports `parseLayout` (strict parse +
+  per-id line spans) which `patchSidecar` builds on.
 - `src/resolver/` — the §6 selector cascade: exact → context → fuzzy → orphan.
 - `src/obsidian/` — `metadata.ts` (metadataCache → resolver `SourceStructure`) and `sidecar-path.ts` (folder-aware: optional `sidecarFolder` is where a **new** sidecar is created, directly in that exact folder, named by the source's basename — the source's directory is *not* mirrored beneath it). An annotation file's identity is its `annotates` frontmatter (a wikilink), **not** its name/location, so a sidecar can be freely moved; lookup scans by `annotates` (`store.sidecarsFor`) and `resolveSourcePath` resolves it via `resolveAnnotates`/`annotatesLink`. These use **`import type` only** from `obsidian`, so they stay testable.
 - `src/store/merge.ts` — pure helpers for combining a clip's annotation files: `pickPrimary` (the file that wins overlaps + receives new highlights) and `mergeResolved` (union across files, primary wins any id/range duplicate). Unit-tested (`merge.test.ts`).
@@ -144,14 +147,34 @@ When adding a module, decide its zone first. If it can be pure, make it pure.
   (a blockquote ending in `^anno-<id>`), not the fence — it indexes every `anno` block by
   id, then scans quotes and looks records up. A quote with no record is reported+skipped;
   a record with no quote is silently dropped (dead data). The serializer emits all `anno`
-  blocks after the units.
-- **Comments are closed by an invisible `[/]:#` terminator** (a link-reference definition
-  that renders to nothing), and the `anno` block notes `comment: true` when prose follows
-  (a *derived* hint — set on serialize, stripped on parse; the prose is the source of
-  truth). The comment follows the **quote** directly (the `anno` block is no longer
-  adjacent to mark its end — hence the terminator matters). A fenced code block or
-  blockquote line is a safeguard boundary; comments support lists + inline but **not**
+  blocks after the units **on a fresh create**; existing files are edited *in place* (next bullet).
+- **Writes are structure-preserving — patch in place, never regenerate (Design.md §5.6).** The
+  sidecar is a human-editable file, so a write must keep what the user added (headings, intros,
+  between-unit prose, bottom summaries, custom frontmatter, *and* the on-disk grouping/order of
+  `anno` blocks — files may interleave units and anno-block groups). `store.rmw`/`mutateById` go
+  through `patchSidecar(text, mutate)` (`src/sidecar/patch.ts`), which strict-parses with
+  `parseLayout` (per-id unit + anno-block line spans), runs the same `mutate` on a clone, diffs by
+  id, and **splices**: unchanged annotations copied byte-for-byte, changed ones re-serialized in
+  place, **new unit inserted before the last anno-block group**, **new anno block appended after the
+  last one**, deletes removed, frontmatter kept verbatim unless changed. Consequence: legacy
+  `status`/spacing migrate to disk only for *touched* units (read-time migration keeps memory
+  correct). `serializeSidecar` is now used **only** by `createAt` (fresh file). Invariants:
+  `patchSidecar(t, noop) === t`; `parseSidecar(patchSidecar(t, m))` is id-content-equal to
+  `m(parseSidecar(t))`. Don't reintroduce a full-file rewrite on the edit path — it silently erases
+  user content (guarded by `structure-preserving-write.e2e.ts`, teeth-verified).
+- **`comment: true` is load-bearing on read; comments are closed by an invisible `[/]:#`
+  terminator** (a link-reference definition that renders to nothing). The `anno` block's
+  `comment` flag is **authoritative**: the parser extracts a comment for a quote *only* when
+  its record says `comment: true` (derived from prose presence on serialize, but on read it
+  *gates* the scan). So prose after a flag-less quote is **not** absorbed — it stays custom
+  content (which is what the structure-preserving writes preserve). The comment normally ends
+  at `[/]:#`; the **safeguard** (a fenced code block or the next blockquote ends it) fires
+  *only when the flag is true but the end mark is missing*, so a comment can't run away. The
+  comment follows the **quote** directly. Comments support lists + inline but **not**
   blockquotes/code-blocks (a bare `---` rule *is* allowed). No `---` separator between units.
+  On serialize the comment's leading/trailing blank lines are trimmed, so there is always
+  **≤1 blank line** between the quote and the comment and between the comment and `[/]:#`
+  (a textarea-trailing-newline can't produce `comment\n\n\n\n[/]:#`).
 - **Parsing is fault-isolated on read, strict on write.** `parseSidecar(text, onIssue)`
   (read path, `store.load`) skips a malformed unit and reports a `ParseIssue` rather
   than throwing — one corrupt unit never blanks the whole file's rendering.
@@ -165,8 +188,10 @@ When adding a module, decide its zone first. If it can be pure, make it pure.
   (cast through `unknown`). Used by `repaint()` in `main.ts` and the flash in navigation.
 - Highlights are pushed into each open editor for a file via a `StateEffect`
   (`setHighlights(view, specs)`); the ViewPlugin maps them through doc changes.
-- Sidecar writes go through `vault.process` (atomic read-modify-write); a new sidecar
-  is `vault.create`d with `annotation_schema`/`annotates`/`source_hash` frontmatter. With a
+- Sidecar writes go through `vault.process` (atomic read-modify-write) and patch the file
+  **in place** via `patchSidecar` (structure-preserving — see the invariant above); a new sidecar
+  is `vault.create`d with `serializeSidecar` and `annotation_schema`/`annotates`/`source_hash`
+  frontmatter. With a
   custom `sidecarFolder`, the store `ensureParentFolder`s the (exact) folder before create.
 - **`annotation_schema` is a number** (the schema gate; was the string `schema`), and
   **`annotates` is a wikilink** `[[path]]` (`.md` dropped), not a bare path — so Obsidian
@@ -511,6 +536,20 @@ Core is done and tested. The runtime layers build and typecheck; the selection t
 custom palette, custom save location, and aside card controls are in. Recent work, newest
 first:
 
+- **Sort highlights command** (Design.md §5.7): "Sort highlights in annotation file" reorders a
+  sidecar's quote units into **source reading order, within each heading section** — every heading
+  level is a fixed divider (conservative nesting), `anno` blocks + custom content stay put, a
+  highlight's trailing text travels with it, orphans sink to section end. Pure
+  `src/sidecar/sort.ts#sortHighlights` (uses `parseLayout.annoSpans` as immovable boundaries) +
+  `store.sortBySourcePosition` (supplies live `range.from` positions). Unit-tested (`sort.test.ts`)
+  + in-vault `sort-highlights.e2e.ts`.
+- **Structure-preserving sidecar writes** (Design.md §5.6): edits no longer regenerate the whole
+  annotation file — they **patch it in place** so user-added content (headings, intros, between-unit
+  prose, bottom summaries, custom frontmatter, the on-disk `anno`-block grouping) survives. New pure
+  `src/sidecar/patch.ts#patchSidecar` (diff+splice over `parseLayout`'s per-id line spans); `rmw`/
+  `mutateById` route through it; `serializeSidecar` is create-only. New highlights insert before the
+  last anno-block group; new anno blocks append after the last one (per the user's rule). Unit-tested
+  (`patch.test.ts`, `layout.test.ts`) + in-vault `structure-preserving-write.e2e.ts` (teeth-verified).
 - **Frontmatter format change** (Design.md §5.2/§5.3): `schema: webclip-annotations/1` (string)
   → `annotation_schema: 1` (**number**), and `annotates` is now a **wikilink** `[[path]]`
   (`.md` dropped) so Obsidian keeps it pointing at the source across a move/rename. New pure

@@ -3,8 +3,10 @@
  * (Design.md §5). Round-trips losslessly: `parseSidecar(serializeSidecar(s))`
  * deep-equals `s`.
  */
-export { parseSidecar, type ParseIssue } from './parse';
+export { parseSidecar, parseLayout, type ParseIssue, type SidecarLayout, type UnitLayout } from './parse';
 export { serializeSidecar } from './serialize';
+export { patchSidecar } from './patch';
+export { sortHighlights } from './sort';
 export { SidecarError, SidecarParseError, SidecarSchemaError } from './errors';
 
 // Re-export the schema constant so callers can gate without reaching into the

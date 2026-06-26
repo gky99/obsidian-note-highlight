@@ -16,7 +16,12 @@ import { annoRef, type AnnoRecord, type Annotation, type Sidecar } from '@/model
 import { dumpAnnoRecord, dumpFrontmatter } from './yaml';
 
 /** The invisible link-reference-definition that terminates a comment (§5.1). */
-const COMMENT_END = '[/]:#';
+export const COMMENT_END = '[/]:#';
+
+/** A comment with leading/trailing blank lines trimmed (the on-disk normal form). */
+function tidyComment(comment: string): string {
+  return comment.replace(/^\s+|\s+$/g, '');
+}
 
 /** Choose a backtick fence at least 3 long and longer than any run in `body`. */
 function chooseFence(body: string): string {
@@ -41,12 +46,12 @@ function serializeBlockquote(annotation: Annotation): string {
 }
 
 /** Render the `` ```anno `` fenced block for an annotation. */
-function serializeAnnoBlock(annotation: Annotation): string {
+export function serializeAnnoBlock(annotation: Annotation): string {
   // `comment: true` is a derived presence hint — emit it iff comment prose
   // actually follows, and never carry a stale flag from the record itself.
   const record: AnnoRecord = { ...annotation.record };
   delete (record as Record<string, unknown>).comment;
-  if (annotation.comment.length > 0) {
+  if (tidyComment(annotation.comment).length > 0) {
     (record as Record<string, unknown>).comment = true;
   }
   const body = dumpAnnoRecord(record).replace(/\n$/, '');
@@ -55,12 +60,18 @@ function serializeAnnoBlock(annotation: Annotation): string {
 }
 
 /** Render one unit's human-readable head: the blockquote, then its comment (if any). */
-function serializeUnit(annotation: Annotation): string {
+export function serializeUnit(annotation: Annotation): string {
   const parts = [serializeBlockquote(annotation)];
-  if (annotation.comment.length > 0) {
+  // Trim leading/trailing blank lines so there is always exactly one blank line
+  // between the quote and the comment, and between the comment and `[/]:#` —
+  // never a pile-up (a comment carrying trailing newlines, e.g. straight from the
+  // textarea, must not serialize as `comment\n\n\n\n[/]:#`). Internal blank lines
+  // of a multi-paragraph comment are preserved.
+  const comment = tidyComment(annotation.comment);
+  if (comment.length > 0) {
     // Comment follows the quote directly; `[/]:#` closes it (the anno block is no
     // longer adjacent to mark the end — it lives at the end of the file).
-    parts.push('', annotation.comment, '', COMMENT_END);
+    parts.push('', comment, '', COMMENT_END);
   }
   return parts.join('\n');
 }

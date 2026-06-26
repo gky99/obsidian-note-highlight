@@ -78,9 +78,11 @@ export interface AnnoRecord {
   color?: string;
   /** Creation timestamp (ISO 8601). */
   created?: string;
-  // Note: the on-disk `comment: true` flag is a *derived* presence hint emitted
-  // by the serializer and stripped by the parser; it is intentionally NOT a field
-  // here — the parsed {@link Annotation.comment} prose is the source of truth.
+  // Note: the on-disk `comment: true` flag is intentionally NOT a field here — the
+  // parsed {@link Annotation.comment} prose holds the content. The serializer emits
+  // the flag from prose presence; on READ it is **load-bearing** — the parser only
+  // extracts a comment for a quote whose record carries `comment: true`, and the
+  // missing-`[/]:#` safeguard fires only then (so flag-less prose stays custom content).
   /** Unknown/forward-compatible fields are preserved on round-trip. */
   [key: string]: unknown;
 }

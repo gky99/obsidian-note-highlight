@@ -162,6 +162,11 @@ export default class MarginaliaPlugin extends Plugin implements SettingsHost {
       callback: () => void this.activateAside(true),
     });
     this.addCommand({
+      id: 'sort-highlights',
+      name: 'Sort highlights in annotation file',
+      callback: () => void this.sortActiveHighlights(),
+    });
+    this.addCommand({
       id: 'import-web-highlights-current',
       name: 'Import Web Highlights into current note',
       callback: () => void this.importer.importCurrent(),
@@ -257,6 +262,32 @@ export default class MarginaliaPlugin extends Plugin implements SettingsHost {
       }
     }
     return path;
+  }
+
+  /**
+   * Command: sort the active note's annotation file(s) so highlights sit in source
+   * reading order within each heading section (§5.7). Works whether the active file
+   * is the source note or one of its annotation files (both map home via
+   * {@link resolveSourcePath}).
+   */
+  private async sortActiveHighlights(): Promise<void> {
+    const active = this.app.workspace.getActiveFile();
+    if (!active) {
+      new Notice('Marginalia: open a note (or its annotation file) to sort.');
+      return;
+    }
+    const sourcePath = this.resolveSourcePath(active.path);
+    const sourceFile = this.app.vault.getAbstractFileByPath(sourcePath);
+    if (!(sourceFile instanceof TFile)) {
+      new Notice('Marginalia: could not find the source note for this file.');
+      return;
+    }
+    if (!this.store.hasSidecar(sourcePath)) {
+      new Notice('Marginalia: no annotations to sort for this note.');
+      return;
+    }
+    const count = await this.store.sortBySourcePosition(sourceFile);
+    if (count > 0) new Notice('Marginalia: highlights sorted by reading order.');
   }
 
   /**

@@ -129,7 +129,7 @@ A sidecar is: **YAML frontmatter** (file-level metadata), then a sequence of **q
 
 The matching **`anno` block** (the machine record) lives in the trailing section and binds back to its quote **by id** (`^anno-<id>` ↔ `id:`), not by position (§4.7) — so it never has to interrupt the human-readable quote + comment. The reader sees quotes and notes together; the machine data sits out of the way at the bottom.
 
-**Comment delimiting.** The comment is closed by a `[/]:#` sentinel — a link reference definition that every Markdown renderer emits as *nothing*, so it is invisible when read yet an explicit, machine-unambiguous end marker. The `anno` block also carries `comment: true` exactly when prose follows (a derived presence hint). As a safeguard against a missing/garbled sentinel, a **fenced code block or a blockquote line** (the next unit) also ends the comment — so a comment can never run away. Cost accepted by design: a comment supports lists and inline syntax but **not** blockquotes or code blocks (those terminate it); a `---` thematic rule, by contrast, is ordinary comment content. No `---` separator is written between units.
+**Comment delimiting.** The comment is closed by a `[/]:#` sentinel — a link reference definition that every Markdown renderer emits as *nothing*, so it is invisible when read yet an explicit, machine-unambiguous end marker. The `anno` block carries `comment: true` exactly when prose follows, and that flag is **load-bearing on read**: the parser extracts a comment for a quote *only when its record says `comment: true`*. A flag-less quote's following prose is therefore left as custom content, never absorbed (this is what makes the §5.6 structure-preserving writes keep hand-added notes). As a safeguard against a missing/garbled sentinel — triggered **only when the flag is true but the `[/]:#` is absent** — a **fenced code block or a blockquote line** (the next unit) also ends the comment, so a comment can never run away. Cost accepted by design: a comment supports lists and inline syntax but **not** blockquotes or code blocks (those terminate it); a `---` thematic rule, by contrast, is ordinary comment content. No `---` separator is written between units. **Serialization trims the comment's leading/trailing blank lines**, so there is always at most one blank line between the quote and the comment and between the comment and `[/]:#` (a comment carrying trailing newlines, e.g. straight from the textarea, never serializes as `comment\n\n\n\n[/]:#`).
 
 **Locality relaxed.** The original design kept all three pieces adjacent ("locality rule") so a hand-edit couldn't orphan half a record; collecting `anno` blocks at the end deliberately trades that for readability. The id-binding plus the §10 #11 resilience (fault isolation; a quote with no record is reported, a record with no quote is silently dropped) is what makes the relaxation safe.
 
@@ -215,6 +215,32 @@ The **exact quote** itself is not duplicated here — it *is* the blockquote (§
 ### 5.5 Inner format choice
 
 **YAML inside the fence.** Rationale: consistent with the frontmatter, human-legible, escaping fully defined, trivially parseable everywhere. JSON-on-one-line is a viable alternative (more compact, stricter) but loses legibility; not chosen.
+
+### 5.6 Structure-preserving writes (added 2026-06-26)
+
+The sidecar is a **human-editable Markdown file**, so a write must not clobber what the human added. The original write path was `parseSidecar → mutate → serializeSidecar`, which **regenerates the whole file from the model**. Anything the parser doesn't capture is therefore lost on the next write: a top-of-file heading or intro, a section between units, a bottom summary, custom frontmatter keys/comments, and — because `serializeSidecar` collects every `anno` block at the end — the on-disk *grouping/order* of the machine blocks (a file may legitimately interleave `units → anno blocks → more units → more anno blocks`).
+
+**Decision: patch the original text in place; never regenerate it.** `patchSidecar(originalText, mutate)` (pure core, `src/sidecar/patch.ts`) keeps the existing `mutate` callback API — so no store call site changed — but instead of serializing the mutated model, it diffs and splices:
+
+1. `parseLayout` does a **strict** parse that additionally returns, per id, the body-line span of the unit (blockquote + comment + `[/]:#`) and the independent span of its `anno` block, plus two insertion points.
+2. The model is deep-cloned, `mutate` runs on the clone, and the result is diffed against the original **by id**.
+3. Unchanged annotations are copied **byte-for-byte**; a changed one's unit and/or `anno` block is re-serialized **in place**; a deleted one's spans are removed; everything that isn't an annotation (custom content, frontmatter) is passed through verbatim.
+
+**Insertion rules (where new things go).** A new **unit** is inserted immediately *before the first fence of the last contiguous `anno`-block group*. A "group" is a maximal run of `anno` fences separated only by blank lines; any non-blank line between two fences (a unit, a heading, prose) starts a new group. The insertion point is found by walking back from the **final** fence while consecutive fences stay blank-separated — **not** by anchoring on the last unit's position. That distinction is load-bearing: a sidecar created by `serializeSidecar` puts *every* quote at the top and all `anno` blocks below, and once custom content (a heading, a ref-less blockquote) splits the trailing blocks into several groups, "after the last unit" would wrongly resolve to the *first* group. Computing the last group from the fence layout keeps it correct regardless of where the quotes sit (the §5.6 insertion-point bug, fixed 2026-06-26). A new **`anno` block** is appended *after the last existing `anno` block* (= end of file in the normal case; above a bottom summary if one exists, keeping the machine data grouped). Existing `anno` blocks are **never reordered**.
+
+**Consequences, accepted.** Writes stop canonicalizing untouched regions, so legacy `status` spellings and old spacing migrate to disk **only for the units a write actually touches** (the parser still migrates on *read*, so the in-memory model is always current — §6.5). Frontmatter is re-emitted only when a field actually changes (so custom keys/formatting survive a normal highlight write). Strictness is unchanged: a malformed unit makes the write **throw** (refuse) rather than clobber (§10 #11). Fresh-file creation still uses `serializeSidecar` — there's nothing to preserve. Invariants: `patchSidecar(t, noop) === t` for a normalized `t`, and `parseSidecar(patchSidecar(t, m))` is content-equal (by id) to `m(parseSidecar(t))`. Verified in-vault by `test/playground/specs/structure-preserving-write.e2e.ts` (neutralize → fail → restore → pass on Obsidian 1.12.7).
+
+### 5.7 Sort highlights (command, added 2026-06-26)
+
+A **"Sort highlights in annotation file"** command reorders a sidecar's quote units into **source reading order**, but only *within each heading section* and without disturbing structure. The reshuffle is pure (`src/sidecar/sort.ts#sortHighlights`); the runtime (`store.sortBySourcePosition`) just supplies each id's live source offset (`range.from` when anchored, `null` when orphaned) and writes each file via `vault.process`.
+
+Rules, confirmed with the user:
+- **Every heading line is a fixed divider** (any level — `#`…`######`). Highlights sort only against the others in the same run between consecutive headings; nothing crosses a heading and **no heading moves**. Nesting is **conservative**: a quote directly under a `#` is *not* mixed with quotes under a nested `##` (they're different runs), and subsection headings are never reordered.
+- A highlight's **trailing custom text travels with it** — a unit's movable block is its blockquote + comment + any content up to the next highlight, heading, or `anno` block. Text between a heading and its *first* highlight stays with the heading (section intro).
+- The machine `anno` blocks are **immovable boundaries** (`parseLayout.annoSpans`) — they bind by id, so order is irrelevant — and all other custom content stays put. Only highlight blocks move, by swapping their text among the slots they already occupy.
+- **Orphans** (no source position) sink to the end of their section, keeping prior relative order (the sort is stable).
+
+Like the writes, it's structure-preserving and strict (a malformed unit makes the parse refuse, skipping that file). Pure-tested in `sort.test.ts`; the runtime command is verified in-vault by `test/playground/specs/sort-highlights.e2e.ts` (before = creation order, after = reading order).
 
 ---
 
@@ -376,7 +402,7 @@ Forward jump, reverse pulse, and orphan-aware refusal are three small handlers o
 - `registerView` + `ItemView`, `workspace.getRightLeaf`, `getLeavesOfType` — the aside.
 - `app.metadataCache.getFileCache(file)` — `blocks`, `sections`, `headings`, `listItems` with positions; map `pin`/`heading` → offsets without re-parsing. Subscribe to `metadataCache.on('changed', …)`.
 - `app.vault.cachedRead(file)` — read source for resolution.
-- `app.vault.process(file, fn)` — atomic read-modify-write when updating a sidecar (e.g. flipping `status`, refreshing `before`/`after`).
+- `app.vault.process(file, fn)` — atomic read-modify-write when updating a sidecar (e.g. flipping `status`, refreshing `before`/`after`). The `fn` is `patchSidecar` (§5.6), which edits the file in place rather than regenerating it, so user-added content survives.
 - `app.fileManager.generateMarkdownLink` — link generation respecting user settings.
 
 ---

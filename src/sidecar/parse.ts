@@ -37,6 +37,8 @@ const ANNO_REF = new RegExp(`\\s*\\${ANNO_REF_PREFIX}([A-Za-z0-9]+)\\s*$`);
 
 interface FrontmatterSplit {
   frontmatter: SidecarFrontmatter;
+  /** The raw frontmatter block (incl. both `---` delimiters), normalized, no trailing newline. */
+  frontmatterRaw: string;
   /** Body lines (everything after the closing frontmatter `---`). */
   bodyLines: string[];
 }
@@ -49,6 +51,13 @@ interface AnnoFence {
   close: number;
   /** The parsed machine record. */
   record: AnnoRecord;
+  /**
+   * Whether the block carried `comment: true` — the load-bearing signal that this
+   * annotation has a comment (§5.1). Captured before {@link toAnnoRecord} strips
+   * the derived hint off the record; the quote scan reads it to decide whether to
+   * extract a comment at all.
+   */
+  hasComment: boolean;
 }
 
 /**
@@ -109,6 +118,7 @@ function splitFrontmatter(text: string): FrontmatterSplit {
 
   return {
     frontmatter: raw as SidecarFrontmatter,
+    frontmatterRaw: lines.slice(0, end + 1).join('\n'),
     bodyLines: lines.slice(end + 1),
   };
 }
@@ -206,6 +216,8 @@ function findAnnoFences(
     // Remember the id even if validation rejects the block, so a quote referencing
     // it reports a *single* specific error (here) rather than also "no anno block".
     if (typeof raw['id'] === 'string') seenIds.add(raw['id']);
+    // Read the comment-presence flag before `toAnnoRecord` strips it off the record.
+    const hasComment = raw['comment'] === true;
     let record: AnnoRecord;
     try {
       record = toAnnoRecord(raw, i);
@@ -214,7 +226,7 @@ function findAnnoFences(
       i = close + 1;
       continue;
     }
-    fences.push({ open: i, close, record });
+    fences.push({ open: i, close, record, hasComment });
     i = close + 1;
   }
   return fences;
@@ -250,27 +262,62 @@ function parseBlockquote(quoteLines: string[]): { quote: string; refId: string |
   return { quote: text.replace(/[ \t]+$/, ''), refId };
 }
 
+interface CommentScan {
+  /** Trimmed comment prose (terminator excluded). */
+  text: string;
+  /**
+   * Exclusive body-line index where the unit's comment region ends on disk — the
+   * line *after* the `[/]:#` terminator when one closed it, else the trimmed
+   * content end (so a comment-less unit yields `from`). {@link parseLayout} uses
+   * this to know a unit's full span for in-place patching.
+   */
+  regionEnd: number;
+}
+
 /**
- * Extract a unit's comment prose, scanning forward from `from` (just after the
- * anno block). The comment ends at the FIRST of:
- *   - the `[/]:#` terminator line (consumed);
- *   - a fenced code block or blockquote line (safeguard — the next unit's head,
- *     or block content a comment does not support; left in place, never eaten);
+ * Scan a unit's comment region starting at `from` (just after the blockquote run).
+ *
+ * The `comment: true` flag on the `anno` block is **authoritative** (§5.1): when
+ * `hasComment` is false the annotation has no comment, so we return immediately
+ * (region collapses to `from`) and any prose that follows the quote is left as
+ * custom content rather than absorbed. When `hasComment` is true, the comment ends
+ * at the FIRST of:
+ *   - the `[/]:#` terminator line (consumed — part of the region, not the prose);
+ *   - a fenced code block or blockquote line (the **safeguard**, used only when the
+ *     `[/]:#` end mark is missing — the next unit's head, or block content a comment
+ *     can't hold; left in place, never eaten);
  *   - end of file.
- * Surrounding blank lines are trimmed.
+ * Surrounding blank lines are trimmed from the prose.
  */
-function extractComment(bodyLines: string[], from: number): string {
+function scanComment(bodyLines: string[], from: number, hasComment: boolean): CommentScan {
+  if (!hasComment) return { text: '', regionEnd: from };
   let hi = from;
+  let terminator = -1;
   while (hi < bodyLines.length) {
     const line = bodyLines[hi];
-    if (COMMENT_END.test(line.trim())) break;
+    if (COMMENT_END.test(line.trim())) {
+      terminator = hi;
+      break;
+    }
     if (CODE_FENCE.test(line) || BLOCKQUOTE_LINE.test(line)) break;
     hi++;
   }
+  // Trim trailing blanks down toward `from` first (guarded by `from`, not the
+  // leading cursor) so a comment-LESS unit collapses its region to `from` instead
+  // of swallowing the blank separator that follows the blockquote.
+  let contentHi = hi;
+  while (contentHi > from && bodyLines[contentHi - 1].trim() === '') contentHi--;
   let lo = from;
-  while (lo < hi && bodyLines[lo].trim() === '') lo++;
-  while (hi > lo && bodyLines[hi - 1].trim() === '') hi--;
-  return bodyLines.slice(lo, hi).join('\n');
+  while (lo < contentHi && bodyLines[lo].trim() === '') lo++;
+  return {
+    text: bodyLines.slice(lo, contentHi).join('\n'),
+    regionEnd: terminator !== -1 ? terminator + 1 : contentHi,
+  };
+}
+
+/** The trimmed comment prose for a unit (see {@link scanComment}). */
+function extractComment(bodyLines: string[], from: number, hasComment: boolean): string {
+  return scanComment(bodyLines, from, hasComment).text;
 }
 
 /**
@@ -297,6 +344,7 @@ export function parseSidecar(text: string, onIssue?: (issue: ParseIssue) => void
   const seenIds = new Set<string>();
   const fences = findAnnoFences(bodyLines, report, seenIds);
   const recordsById = new Map<string, AnnoRecord>();
+  const hasCommentById = new Map<string, boolean>();
   const fenceLines = new Set<number>();
   for (const fence of fences) {
     for (let l = fence.open; l <= fence.close; l++) fenceLines.add(l);
@@ -309,11 +357,13 @@ export function parseSidecar(text: string, onIssue?: (issue: ParseIssue) => void
       continue;
     }
     recordsById.set(fence.record.id, fence.record);
+    hasCommentById.set(fence.record.id, fence.hasComment);
   }
 
   // The spine is the quote: each blockquote ending in `^anno-<id>` is a unit. Its
   // record is looked up by id (bound by the ref, not position); its comment is the
-  // prose that follows. A record with no quote is dead data and silently ignored.
+  // prose that follows *iff its record says `comment: true`* (§5.1). A record with
+  // no quote is dead data and silently ignored.
   const annotations: Annotation[] = [];
   let i = 0;
   while (i < bodyLines.length) {
@@ -342,10 +392,168 @@ export function parseSidecar(text: string, onIssue?: (issue: ParseIssue) => void
       continue;
     }
     const { quote } = parseBlockquote(bodyLines.slice(i, end));
-    const comment = extractComment(bodyLines, end);
+    const comment = extractComment(bodyLines, end, hasCommentById.get(id) ?? false);
     annotations.push({ id, quote, record, comment });
     i = end;
   }
 
   return { frontmatter, annotations };
+}
+
+/** The on-disk line span of one annotation, for in-place patching (half-open `[start, end)`). */
+export interface UnitLayout {
+  id: string;
+  /** Body-line span of the unit's human head: blockquote + comment + `[/]:#` terminator. */
+  unitStart: number;
+  unitEnd: number;
+  /** Body-line span of this id's machine `anno` fenced block. */
+  annoStart: number;
+  annoEnd: number;
+}
+
+/**
+ * A strict parse that additionally exposes the body-line layout needed to patch a
+ * sidecar **in place** (Design.md §5.5 / structure-preserving writes): per-id unit
+ * and `anno`-block spans, plus the two insertion points. Used by `patchSidecar`,
+ * never the read path. Errors are fatal here (no tolerant mode) — matching the
+ * strict write contract (a malformed unit refuses the write, never clobbers).
+ */
+export interface SidecarLayout {
+  sidecar: Sidecar;
+  /** Raw frontmatter block (incl. both `---`), normalized, no trailing newline. */
+  frontmatterRaw: string;
+  /** Body lines (everything after the closing frontmatter `---`). */
+  bodyLines: string[];
+  /** One entry per parsed unit, in document order of its blockquote. */
+  units: UnitLayout[];
+  /**
+   * Every `anno` fenced block's body-line span (half-open), in document order —
+   * including any whose quote was dropped. Consumers that reorder content (the
+   * highlight sort) treat these as immovable boundaries.
+   */
+  annoSpans: { start: number; end: number }[];
+  /**
+   * Body-line index at which to insert a NEW unit: immediately before the first
+   * fence of the **last** contiguous `anno`-block group (so a new highlight lands
+   * right before the trailing machine blocks, after any custom content). Equals
+   * `bodyLines.length` when there are no `anno` blocks.
+   */
+  newUnitAt: number;
+  /**
+   * Body-line index at which to append a NEW `anno` block: after the last existing
+   * `anno` block (= end of body in the normal case). Equals `bodyLines.length`
+   * when there are no `anno` blocks.
+   */
+  newAnnoAt: number;
+}
+
+export function parseLayout(text: string): SidecarLayout {
+  // Strict: any per-unit problem throws (a malformed unit must refuse the write).
+  const report = (issue: ParseIssue): never => {
+    throw new SidecarParseError(issue.message);
+  };
+
+  const { frontmatter, frontmatterRaw, bodyLines } = splitFrontmatter(text);
+
+  const seenIds = new Set<string>();
+  const fences = findAnnoFences(bodyLines, report, seenIds);
+  const recordsById = new Map<string, AnnoRecord>();
+  const hasCommentById = new Map<string, boolean>();
+  const annoSpanById = new Map<string, { start: number; end: number }>();
+  const fenceLines = new Set<number>();
+  for (const fence of fences) {
+    for (let l = fence.open; l <= fence.close; l++) fenceLines.add(l);
+    if (recordsById.has(fence.record.id)) {
+      report({
+        line: fence.open + 1,
+        id: fence.record.id,
+        message: `duplicate anno block id "${fence.record.id}"; keeping the first.`,
+      });
+    }
+    recordsById.set(fence.record.id, fence.record);
+    hasCommentById.set(fence.record.id, fence.hasComment);
+    annoSpanById.set(fence.record.id, { start: fence.open, end: fence.close + 1 });
+  }
+
+  const annotations: Annotation[] = [];
+  const units: UnitLayout[] = [];
+  let i = 0;
+  while (i < bodyLines.length) {
+    if (fenceLines.has(i) || !BLOCKQUOTE_LINE.test(bodyLines[i])) {
+      i++;
+      continue;
+    }
+    let end = i;
+    while (end < bodyLines.length && !fenceLines.has(end) && BLOCKQUOTE_LINE.test(bodyLines[end])) {
+      end++;
+    }
+    const id = refIdOfLine(bodyLines[end - 1]);
+    if (id === null) {
+      i = end;
+      continue;
+    }
+    const record = recordsById.get(id);
+    if (!record) {
+      if (!seenIds.has(id)) {
+        report({ line: i + 1, id, message: `quote "^anno-${id}" has no matching anno block.` });
+      }
+      i = end;
+      continue;
+    }
+    const { quote } = parseBlockquote(bodyLines.slice(i, end));
+    const { text: comment, regionEnd } = scanComment(bodyLines, end, hasCommentById.get(id) ?? false);
+    const annoSpan = annoSpanById.get(id);
+    // `record` came from `recordsById`, so its span is always present.
+    if (annoSpan) {
+      annotations.push({ id, quote, record, comment });
+      units.push({
+        id,
+        unitStart: i,
+        unitEnd: regionEnd,
+        annoStart: annoSpan.start,
+        annoEnd: annoSpan.end,
+      });
+    }
+    i = end;
+  }
+
+  // Insertion points. New `anno` blocks trail after the last existing one.
+  const newAnnoAt =
+    fences.length > 0 ? Math.max(...fences.map((f) => f.close)) + 1 : bodyLines.length;
+  // A new unit goes before the **last contiguous `anno`-block group**. A "group" is a
+  // maximal run of fences separated only by blank lines; any non-blank line between two
+  // fences (a unit, a heading, prose) starts a new group. Walk back from the final fence
+  // while consecutive fences are blank-separated, and insert at that group's first fence.
+  // (This is independent of where the units sit — a file may keep every quote at the top
+  // and still have several anno-block groups, so anchoring on the last unit's end would
+  // wrongly pick the *first* group.)
+  let newUnitAt: number;
+  if (fences.length === 0) {
+    newUnitAt = bodyLines.length;
+  } else {
+    let groupStart = fences[fences.length - 1].open;
+    for (let k = fences.length - 1; k > 0; k--) {
+      let onlyBlank = true;
+      for (let l = fences[k - 1].close + 1; l < fences[k].open; l++) {
+        if (bodyLines[l].trim() !== '') {
+          onlyBlank = false;
+          break;
+        }
+      }
+      if (!onlyBlank) break;
+      groupStart = fences[k - 1].open;
+    }
+    newUnitAt = groupStart;
+  }
+
+  const annoSpans = fences.map((f) => ({ start: f.open, end: f.close + 1 }));
+  return {
+    sidecar: { frontmatter, annotations },
+    frontmatterRaw,
+    bodyLines,
+    units,
+    annoSpans,
+    newUnitAt,
+    newAnnoAt,
+  };
 }
