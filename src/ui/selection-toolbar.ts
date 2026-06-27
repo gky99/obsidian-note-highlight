@@ -53,6 +53,12 @@ export interface SelectionToolbarDeps {
   app: App;
   /** Palette colors to offer (read live, so settings edits take effect). */
   getColors: () => string[];
+  /**
+   * Whether a file is an annotation file (a sidecar). The toolbar stays hidden in
+   * one: a highlight there would annotate the sidecar itself and collide with the
+   * panel for the note it annotates.
+   */
+  isAnnotationFile: (file: TFile) => boolean;
   /** A swatch was clicked over a fresh selection: create the highlight. */
   onHighlight: (req: HighlightRequest, color: string) => void;
   /** Resolve the highlight painted with `id` in `view` (a clicked highlight). */
@@ -148,6 +154,8 @@ export class SelectionToolbar {
 
     const view = this.deps.app.workspace.getActiveViewOfType(MarkdownView);
     if (!view || !view.file) return null;
+    // Never offer to highlight inside an annotation file (a sidecar) — see deps.
+    if (this.deps.isAnnotationFile(view.file)) return null;
     // The selection must live inside this view (not the aside, another pane, …).
     const anchor = selection.anchorNode;
     if (!anchor || !view.containerEl.contains(anchor)) return null;
@@ -188,7 +196,7 @@ export class SelectionToolbar {
     if (this.el?.contains(target)) return; // a click on our own buttons
 
     const view = this.deps.app.workspace.getActiveViewOfType(MarkdownView);
-    if (view?.file && view.containerEl.contains(target)) {
+    if (view?.file && !this.deps.isAnnotationFile(view.file) && view.containerEl.contains(target)) {
       const hl = target.closest('.mrg-highlight');
       const id = hl?.getAttribute('data-anno-id') ?? null;
       if (hl && id) {

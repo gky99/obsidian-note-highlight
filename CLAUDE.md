@@ -249,6 +249,17 @@ When adding a module, decide its zone first. If it can be pure, make it pure.
   - **One passage, one highlight** (no stacking): a selection overlapping an existing
     highlight routes to *edit*, never create; and `store.createHighlight` itself refuses an
     overlapping range (`annotationAt` guard) so the rule holds for the command too.
+  - **No highlighting inside an annotation file (a sidecar).** A highlight there would
+    annotate the sidecar itself (a sidecar-of-a-sidecar) and its painted marks would collide
+    with the panel for the note the sidecar annotates. `main#isAnnotationFile(file)` (the
+    `annotates` frontmatter is present — the §4.1 identity, checked **directly** so it fails
+    *closed* even when the link is momentarily unresolvable) gates two layers: the toolbar
+    stays hidden in a sidecar (`selectionState`/`handlePointerDown` bail via the
+    `isAnnotationFile` dep), and `main#highlightRange` — the single choke point BOTH the
+    toolbar and the `Highlight selection` command funnel through — refuses with a Notice. The
+    choke-point guard is the real safeguard; the toolbar suppression is UX. Verified on real
+    Obsidian by `annotation-file-safeguard.e2e.ts` (teeth: neutralize the guard → a
+    sidecar-of-a-sidecar is born).
   The old `src/editor/selection-toolbar.ts` (CM6) was removed.
 - **Palette** is `settings.palette: string[]` (tokens or `#hex`). It drives the toolbar
   swatches, the aside card color picker, and the default-color dropdown. `loadSettings`

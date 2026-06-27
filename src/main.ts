@@ -113,6 +113,7 @@ export default class MarginaliaPlugin extends Plugin implements SettingsHost {
     const toolbar = new SelectionToolbar({
       app: this.app,
       getColors: () => this.settings.palette,
+      isAnnotationFile: (file) => this.isAnnotationFile(file),
       onHighlight: (req, color) => void this.highlightRequest(req, color),
       lookupById: (view, id) =>
         this.existingHighlight(view, (sourcePath) => this.store.getById(sourcePath, id)),
@@ -274,6 +275,19 @@ export default class MarginaliaPlugin extends Plugin implements SettingsHost {
       }
     }
     return path;
+  }
+
+  /**
+   * Whether `file` is an annotation file (a sidecar) rather than a source note.
+   * Identity is the `annotates` frontmatter (§4.1), checked **directly** (not via
+   * {@link resolveSourcePath}) so a sidecar is still recognized when its `annotates`
+   * link is momentarily unresolvable (just-created file / broken link) — the
+   * safeguard fails closed. Highlighting is refused in annotation files (see
+   * {@link highlightRange}); the toolbar also stays hidden there.
+   */
+  private isAnnotationFile(file: TFile): boolean {
+    const annotates = this.app.metadataCache.getFileCache(file)?.frontmatter?.annotates;
+    return typeof annotates === 'string' && annotates.length > 0;
   }
 
   /**
@@ -525,6 +539,14 @@ export default class MarginaliaPlugin extends Plugin implements SettingsHost {
     color?: string,
   ): Promise<void> {
     if (from === to) return;
+    // Safeguard: never highlight inside an annotation file. Doing so would
+    // annotate the sidecar itself (a sidecar-of-a-sidecar) and collide with the
+    // panel for the note it annotates. This is the choke point for *both* the
+    // toolbar (`highlightRequest`) and the `Highlight selection` command.
+    if (this.isAnnotationFile(file)) {
+      new Notice('Marginalia: can’t highlight inside an annotation file.');
+      return;
+    }
     const anno = await this.store.createHighlight(file, from, to, color);
     if (!anno) return;
     await this.activateAside(false);

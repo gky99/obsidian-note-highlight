@@ -515,6 +515,29 @@ Overlap is computed against **live resolved ranges** (§6.3), never stored offse
 guard inherits the resolver's honesty (an orphaned highlight occupies no range, so it
 never blocks a new one).
 
+#### 14.2.1 No highlighting inside an annotation file
+
+A highlight is only meaningful over a **source note**. Creating one *inside* an annotation
+file would annotate the sidecar itself — a sidecar-of-a-sidecar — and the resulting painted
+marks would collide with the panel for the note the sidecar actually annotates. So
+highlighting is refused there, in the same defence-in-depth shape as §14.2:
+
+- **UI suppression** — the toolbar stays hidden in an annotation file: `selectionState`
+  (selection) and `handlePointerDown` (highlight click) bail early, so no swatches are even
+  offered. (The edit intent can't arise there anyway — a sidecar carries no painted
+  highlights to click.)
+- **Choke-point guard** — `main#highlightRange`, the single method **both** the toolbar
+  (`highlightRequest`) and the `Highlight selection` command (`highlightSelection`) funnel
+  through, refuses with a Notice. This is the real safeguard; the UI suppression is polish.
+
+Both layers share one predicate, `main#isAnnotationFile(file)`: the file's frontmatter
+carries an `annotates` string (the §4.1 identity). It is read **directly** from the metadata
+cache, *not* via `resolveSourcePath(p) !== p`, so it **fails closed** — a sidecar whose
+`annotates` link is momentarily unresolvable (a just-created file, a temporarily broken link)
+is still recognized and protected. Verified on real Obsidian by
+`annotation-file-safeguard.e2e.ts` (teeth: neutralize the guard and a sidecar-of-a-sidecar is
+written into the sidecar).
+
 ### 14.3 Repaint on Reading ↔ Editing mode switch (lesson learned)
 
 **Symptom observed this session:** after toggling a pane between Reading and Editing,
