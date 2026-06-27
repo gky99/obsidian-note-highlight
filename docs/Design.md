@@ -561,6 +561,36 @@ on a real Reading↔Editing transition makes it fire **exactly once** per switch
 *which file is active* and *what the annotations are*. A correct highlight set is necessary
 but not sufficient — it must be re-pushed whenever the surface that displays it is rebuilt.
 
+#### 14.3.1 Reading-mode highlight changes are reconciled in place — never a full rerender
+
+A reading-mode highlight change used to repaint via `previewMode.rerender(true)`, which has
+**two** failure modes. First, Obsidian's rerender restores its own *remembered* scroll position,
+not the live one — so when the two differ (routine after the reader has scrolled), the document
+jumped, commonly to the top. Second — even once the scroll is reasserted — re-rendering the whole
+preview is **visibly disruptive**: the user sees a flash as the preview blanks and repaints (a
+brief scroll-to-top-and-back). Bisecting on real Obsidian pinned the scroll part precisely:
+`rerender(true)` *alone* moves scroll; the in-place painter does not; Live Preview is immune (CM6
+pushes a decoration `StateEffect`, no re-render).
+
+The fix removes the rerender from the highlight path entirely. `reading.ts#syncReadingHighlights`
+reconciles the rendered preview to the resolved set **in place**: for each painted
+`.mrg-highlight[data-anno-id]` span it *unwraps* the span when the highlight was deleted or
+orphaned, else *recolors* it (mutating the existing node's class/inline background — same DOM
+node, no rebuild); then it *paints* any newly-anchored highlight that has no span yet (the
+existing `paintMissingHighlights`). `repaint()` and the mode-flip `repaintView()` both route
+reading views through this via `scheduleHeal` (an immediate pass plus a deferred one, which also
+covers the intermittent render/cache race §14.3 / the 2026-06-27 self-heal note). No rerender → no
+flash, no scroll jump, and recolor/delete update the same DOM rather than rebuilding it.
+
+This is the non-destructive analog of how marker-injecting reading highlighters avoid a flash
+(they edit the note's own text, so the editor updates incrementally) — we never touch the note, so
+we mutate **our overlay spans** directly instead. Guarded by `reading-scroll-preserve.e2e.ts` —
+case A: frame-by-frame, scroll never dips (a bare `rerender(true)` dips ~768 px on the first
+frame); case B: a recolor keeps the **same span element** (a rerender would replace it) and flips
+its color, a delete unwraps it — plus happy-dom unit tests on `syncReadingHighlights`. *General
+lesson: re-rendering to reflect a small change is both scroll-hostile and visually disruptive;
+reconcile the specific DOM that changed.*
+
 ### 14.4 Comment in one click from the highlight (inline editor)
 
 **Motivation:** with recolor/delete reachable in one click from a clicked highlight but

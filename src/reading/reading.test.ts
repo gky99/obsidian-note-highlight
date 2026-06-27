@@ -8,7 +8,7 @@
 import { describe, it, expect } from 'vitest';
 import type { MarkdownPostProcessorContext } from 'obsidian';
 
-import { makeReadingHighlighter, paintMissingHighlights } from './reading';
+import { makeReadingHighlighter, paintMissingHighlights, syncReadingHighlights } from './reading';
 import type { AnnotationStore, ResolvedAnnotation } from '@/store/store';
 
 const SENTENCE = 'The quick brown fox jumps.';
@@ -316,5 +316,64 @@ describe('makeReadingHighlighter', () => {
     const el = paragraph();
     paint(el, ctx(null));
     expect(el.querySelector('.mrg-highlight')).toBeNull();
+  });
+});
+
+// In-place reconciliation — recolor/unwrap/paint without a full rerender (the
+// flash-free reading-mode update path).
+describe('syncReadingHighlights', () => {
+  function orphanOf(id: string, quote: string): ResolvedAnnotation {
+    return {
+      annotation: { id, quote, comment: '', record: { id, status: 'exact' } },
+      result: { status: 'orphaned' },
+    } as unknown as ResolvedAnnotation;
+  }
+
+  it('recolors an existing span IN PLACE — same node, new color, no extra span', () => {
+    const el = paragraph(); // 'The quick brown fox jumps.'
+    paintMissingHighlights(el, [anchored('quick', 0, 0, 'yellow')]);
+    const before = el.querySelector<HTMLElement>('.mrg-highlight');
+    expect(before).not.toBeNull();
+
+    syncReadingHighlights(el, [anchored('quick', 0, 0, '#ff0000')]);
+    const after = el.querySelector<HTMLElement>('.mrg-highlight');
+    expect(after).toBe(before); // the SAME element — not rebuilt (would be a rerender)
+    expect(el.querySelectorAll('.mrg-highlight').length).toBe(1);
+    expect(after?.className).not.toContain('mrg-color-yellow'); // token class dropped
+    expect(after?.style.backgroundColor).not.toBe(''); // arbitrary #hex → inline bg
+  });
+
+  it('unwraps a span when its highlight is deleted, leaving the text intact', () => {
+    const el = paragraph();
+    paintMissingHighlights(el, [anchored('quick', 0, 0)]);
+    expect(el.querySelector('.mrg-highlight')).not.toBeNull();
+    const text = el.textContent;
+
+    syncReadingHighlights(el, []); // all highlights gone
+    expect(el.querySelector('.mrg-highlight')).toBeNull();
+    expect(el.textContent).toBe(text);
+  });
+
+  it('unwraps a span when its highlight orphans', () => {
+    const el = paragraph();
+    paintMissingHighlights(el, [anchored('quick', 0, 0)]); // id a1
+    syncReadingHighlights(el, [orphanOf('a1', 'quick')]); // same id, now orphaned
+    expect(el.querySelector('.mrg-highlight')).toBeNull();
+  });
+
+  it('paints a newly-anchored highlight that has no span yet', () => {
+    const el = paragraph();
+    syncReadingHighlights(el, [anchored('brown', 0, 0)]);
+    expect(el.querySelector('.mrg-highlight')?.textContent).toBe('brown');
+  });
+
+  it('is idempotent — re-running keeps the same node and count', () => {
+    const el = paragraph();
+    const items = [anchored('quick', 0, 0, '#ff0000')];
+    syncReadingHighlights(el, items);
+    const before = el.querySelector('.mrg-highlight');
+    syncReadingHighlights(el, items);
+    expect(el.querySelector('.mrg-highlight')).toBe(before);
+    expect(el.querySelectorAll('.mrg-highlight').length).toBe(1);
   });
 });

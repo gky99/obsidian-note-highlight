@@ -503,6 +503,29 @@ spans to reproduce the exact symptom, run the heal, the highlight repaints (0 �
 intermittent *race itself* could not be reproduced headless (clean vault, programmatic switching);
 the heal targets the observable symptom and recovers it deterministically.
 
+**Reading-mode highlight changes reconcile in place (no rerender) — fixed (2026-06-28).** In
+reading mode, creating/recoloring/deleting a highlight (a) scrolled the document away from the
+reader (commonly to the top) and (b) **flashed** the whole preview. Both stem from repainting
+reading-mode highlights with `previewMode.rerender(true)`: Obsidian's rerender restores its own
+*remembered* scroll position (≠ live → the jump), and re-rendering the whole preview is visibly
+disruptive (the flash). Bisect on real Obsidian: `rerender(true)` alone moves scroll (~768px); the
+in-place painter does not; Live Preview is immune (CM6 decoration effect, no re-render). **Fix:
+drop the rerender from the highlight path entirely.** `reading.ts#syncReadingHighlights` reconciles
+the rendered preview to the resolved set in place — unwrap spans whose highlight was deleted/
+orphaned, recolor changed spans (mutating the **same** DOM node, not rebuilding), paint newly-
+anchored ones (`paintMissingHighlights`). `repaint()` and the mode-flip `repaintView()` route
+reading views through it via `scheduleHeal` (immediate + deferred pass, which also covers the
+render/cache race — so `healReadingViews` now syncs instead of only painting-missing, and no longer
+early-returns on an empty set, so deleting the last highlight unwraps its spans). The first e2e for
+reading-mode *interaction* here is `reading-scroll-preserve.e2e.ts` — case A: frame-by-frame, scroll
+never dips (teeth: a bare `rerender(true)` dips ~768px on frame 1); case B: recolor keeps the same
+span element (a rerender would replace it) and flips its color, delete unwraps — plus happy-dom unit
+tests on `syncReadingHighlights`. The removed `previewMode.rerender(true)` was the **last** rerender
+on the highlight path; `specSignature`/`readingSig` (the "rerender only when the set changed" gate)
+went with it (the in-place sync is cheap + idempotent, so it needs no gate). Non-destructive analog
+of marker-injecting highlighters that avoid the flash by editing the note's text — we never touch
+the note, so we mutate our overlay spans instead.
+
 **Translation-overlay interop — fixed (2026-06-23).** The *Immersive Translate* plugin
 injects translated text into the reading-mode DOM as `<font class="immersive-translate-target-
 wrapper">` nodes (and `immersive-translate-target-*` variants) appended after each original

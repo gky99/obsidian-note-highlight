@@ -198,6 +198,62 @@ export function paintMissingHighlights(container: HTMLElement, items: ResolvedAn
 }
 
 /**
+ * Reconcile an already-rendered reading preview to the resolved highlight set,
+ * **in place** — without `previewMode.rerender(true)`. For every painted
+ * `.mrg-highlight[data-anno-id]` span: unwrap it when its highlight is gone
+ * (deleted) or no longer anchored (orphaned), else update its color when it
+ * changed; then paint any newly-anchored highlight that has no span yet
+ * ({@link paintMissingHighlights}).
+ *
+ * This is what lets a recolor / create / delete update reading mode **without a
+ * full re-render** — so the document neither flashes nor jumps (a `rerender(true)`
+ * briefly repaints the whole preview at Obsidian's *remembered* scroll position,
+ * which is the visible flash-to-top the user reported). Non-destructive: it only
+ * ever touches our own overlay spans, never the note (unlike marker-injecting
+ * highlighters). Idempotent — a no-op when the DOM already matches.
+ */
+export function syncReadingHighlights(container: HTMLElement, items: ResolvedAnnotation[]): void {
+  // id → desired color (a color of `undefined` is a legit "default color", so the
+  // unwrap decision is keyed on *membership*, not the value).
+  const wanted = new Map<string, string | undefined>();
+  for (const { annotation, result } of items) {
+    if (result.status === 'anchored') wanted.set(annotation.id, annotation.record.color);
+  }
+
+  for (const span of Array.from(
+    container.querySelectorAll<HTMLElement>(`.${HIGHLIGHT_CLASS}[data-anno-id]`),
+  )) {
+    const id = span.getAttribute('data-anno-id');
+    if (id && wanted.has(id)) colorHighlightSpan(span, wanted.get(id)); // recolor in place
+    else unwrapHighlight(span); // deleted / orphaned → remove the mark
+  }
+
+  paintMissingHighlights(container, items); // paint newly-anchored highlights
+}
+
+/** Paint a highlight span's color (className + inline `#hex` bg) — mirrors {@link wrapRange}. */
+function colorHighlightSpan(span: HTMLElement, color: string | undefined): void {
+  const render = renderColor(color);
+  span.className = render.className ? `${HIGHLIGHT_CLASS} ${render.className}` : HIGHLIGHT_CLASS;
+  // A built-in token carries no inline background; an arbitrary `#hex` does. Setting
+  // '' clears a stale hex when recoloring from a hex to a token.
+  span.style.backgroundColor = render.background ?? '';
+}
+
+/**
+ * Replace a highlight span with its own contents, rejoining the text so a later
+ * match can run across the former span boundary. Splitting on wrap + this merge on
+ * unwrap keep the text-node structure stable across edits.
+ */
+function unwrapHighlight(span: HTMLElement): void {
+  const parent = span.parentNode;
+  if (!parent) return;
+  while (span.firstChild) parent.insertBefore(span.firstChild, span);
+  parent.removeChild(span);
+  parent.normalize(); // merge adjacent text nodes
+}
+
+/**
  * Find the first occurrence of `needle` in the rendered text of `root` (skipping
  * text already inside a `.mrg-highlight`) and wrap it in highlight span(s).
  * Returns `true` if a wrap happened.

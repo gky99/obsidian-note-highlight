@@ -36,7 +36,7 @@ import {
   renderAnnoBlock,
   makeReadingHighlighter,
   ANNO_LANGUAGE,
-  paintMissingHighlights,
+  syncReadingHighlights,
 } from '@/reading';
 import { findSourceRange } from '@/text/locate';
 import { normalizeColorValue } from '@/color';
@@ -61,8 +61,6 @@ export default class MarginaliaPlugin extends Plugin implements SettingsHost {
   settings: MarginaliaSettings = { ...DEFAULT_SETTINGS };
   store!: AnnotationStore;
   private importer!: WebHighlightsImporter;
-  /** Last painted highlight signature per source, to re-render reading mode only when it changes. */
-  private readingSig = new Map<string, string>();
   /**
    * Last seen render mode per open view, so we can repaint exactly once when a
    * pane toggles Reading ↔ Editing. Neither `file-open` nor `active-leaf-change`
@@ -384,39 +382,32 @@ export default class MarginaliaPlugin extends Plugin implements SettingsHost {
 
   /**
    * Repaint every open view of `sourcePath`. CM editors (source / Live Preview)
-   * get the highlight specs pushed directly; reading-mode views paint via the
-   * post-processor, so they need a re-render — but only when the highlight set
-   * actually changed (a comment edit must not flash the preview).
+   * get the highlight specs pushed directly. Reading-mode views are reconciled
+   * **in place** by {@link scheduleHeal} (recolor / unwrap / paint) — never by a
+   * full `previewMode.rerender(true)`, which would flash the preview and yank the
+   * scroll to Obsidian's remembered position (the reported bug).
    */
   private repaint(sourcePath: string): void {
     const specs = this.specsFor(sourcePath);
-    const signature = specSignature(specs);
-    const readingStale = this.readingSig.get(sourcePath) !== signature;
-    this.readingSig.set(sourcePath, signature);
-
     for (const leaf of this.app.workspace.getLeavesOfType(MARKDOWN_VIEW_TYPE)) {
       const view = leaf.view;
       if (!(view instanceof MarkdownView) || view.file?.path !== sourcePath) continue;
       this.lastModes.set(view, view.getMode());
-      if (view.getMode() === 'preview') {
-        if (readingStale) view.previewMode.rerender(true);
-      } else {
+      if (view.getMode() !== 'preview') {
         const cm = editorView(view.editor);
         if (cm) setHighlights(cm, specs);
       }
     }
-    // Self-heal reading-mode paints that the rerender/post-processor may have
-    // missed (intermittent render/cache race — see paintMissingHighlights).
     this.scheduleHeal(sourcePath);
   }
 
   /**
-   * Re-paint, after render-affecting events settle, any anchored highlight that
-   * is rendered in an open reading view but has no `.mrg-highlight` span yet.
-   * Idempotent; runs immediately and once more after a short delay (the rerender
-   * is async, and a section may re-attach from cache un-painted). Timers are
-   * tracked per source so rapid mode-switching can't pile them up, and cleared on
-   * unload.
+   * Reconcile each open reading view of `sourcePath` to the live highlight set, in
+   * place. Runs immediately and once more after a short delay — reading mode
+   * re-renders / re-attaches cached sections asynchronously (on a mode flip, a
+   * scroll), so a section can land after the first pass; the deferred pass catches
+   * it. Timers are tracked per source so rapid mode-switching can't pile them up,
+   * and cleared on unload.
    */
   private scheduleHeal(sourcePath: string): void {
     this.healReadingViews(sourcePath);
@@ -429,16 +420,20 @@ export default class MarginaliaPlugin extends Plugin implements SettingsHost {
     this.healTimers.set(sourcePath, t);
   }
 
-  /** Paint any unpainted anchored highlights into each open reading view of `sourcePath`. */
+  /**
+   * Reconcile every open reading view of `sourcePath` to the resolved set in place
+   * (recolor / unwrap deleted / paint new), via {@link syncReadingHighlights} — no
+   * rerender, so no flash and no scroll jump. The empty set is *not* short-circuited:
+   * deleting the last highlight must still unwrap its leftover spans.
+   */
   private healReadingViews(sourcePath: string): void {
     const resolved = this.store.getResolved(sourcePath);
-    if (resolved.length === 0) return;
     for (const leaf of this.app.workspace.getLeavesOfType(MARKDOWN_VIEW_TYPE)) {
       const view = leaf.view;
       if (!(view instanceof MarkdownView) || view.getMode() !== 'preview' || !view.file) continue;
       if (this.resolveSourcePath(view.file.path) !== sourcePath) continue;
       const container = view.containerEl.querySelector('.markdown-preview-view');
-      if (container instanceof HTMLElement) paintMissingHighlights(container, resolved);
+      if (container instanceof HTMLElement) syncReadingHighlights(container, resolved);
     }
   }
 
@@ -482,11 +477,10 @@ export default class MarginaliaPlugin extends Plugin implements SettingsHost {
     const sourcePath = this.resolveSourcePath(file.path);
     const specs = this.specsFor(sourcePath);
     if (view.getMode() === 'preview') {
-      // Entering reading mode: force the post-processor to re-run so highlights
-      // paint over the (possibly cached, un-highlighted) preview DOM, then
-      // self-heal any the rerender missed (intermittent render/cache race).
-      this.readingSig.set(sourcePath, specSignature(specs));
-      if (specs.length > 0) view.previewMode.rerender(true);
+      // Entering reading mode: paint highlights into the (possibly cached,
+      // un-highlighted) preview DOM **in place** — no rerender, so no flash (§14.3.1).
+      // The immediate + deferred heal passes catch sections that re-attach from cache
+      // after the first pass (the intermittent render/cache race).
       this.scheduleHeal(sourcePath);
     } else {
       // Entering editing mode: the CM editor starts with no decorations.
@@ -577,9 +571,4 @@ export default class MarginaliaPlugin extends Plugin implements SettingsHost {
 /** Obsidian exposes the underlying CM6 view as the undocumented `editor.cm`. */
 function editorView(editor: Editor): EditorView | undefined {
   return (editor as unknown as { cm?: EditorView }).cm;
-}
-
-/** Stable signature of a highlight set, to detect "did the painted set change?". */
-function specSignature(specs: HighlightSpec[]): string {
-  return specs.map((s) => `${s.id}:${s.from}:${s.to}:${s.color ?? ''}`).join('|');
 }

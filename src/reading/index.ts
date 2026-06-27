@@ -15,6 +15,7 @@ export {
   makeReadingHighlighter,
   ANNO_LANGUAGE,
   paintMissingHighlights,
+  syncReadingHighlights,
 } from './reading';
 
 // Pure helpers, exported for unit testing and reuse.
