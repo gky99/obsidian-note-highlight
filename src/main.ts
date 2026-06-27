@@ -32,7 +32,12 @@ import {
   flashRange,
   type HighlightSpec,
 } from '@/editor';
-import { renderAnnoBlock, makeReadingHighlighter, ANNO_LANGUAGE } from '@/reading';
+import {
+  renderAnnoBlock,
+  makeReadingHighlighter,
+  ANNO_LANGUAGE,
+  paintMissingHighlights,
+} from '@/reading';
 import { findSourceRange } from '@/text/locate';
 import { normalizeColorValue } from '@/color';
 import { WebHighlightsImporter } from '@/import';
@@ -65,6 +70,13 @@ export default class MarginaliaPlugin extends Plugin implements SettingsHost {
    * (or reading view) keeps no highlights until the next store change.
    */
   private lastModes = new WeakMap<MarkdownView, string>();
+  /** Pending deferred reading-mode self-heal timers, keyed by source path. */
+  private healTimers = new Map<string, number>();
+
+  onunload(): void {
+    for (const t of this.healTimers.values()) window.clearTimeout(t);
+    this.healTimers.clear();
+  }
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -379,6 +391,41 @@ export default class MarginaliaPlugin extends Plugin implements SettingsHost {
         if (cm) setHighlights(cm, specs);
       }
     }
+    // Self-heal reading-mode paints that the rerender/post-processor may have
+    // missed (intermittent render/cache race — see paintMissingHighlights).
+    this.scheduleHeal(sourcePath);
+  }
+
+  /**
+   * Re-paint, after render-affecting events settle, any anchored highlight that
+   * is rendered in an open reading view but has no `.mrg-highlight` span yet.
+   * Idempotent; runs immediately and once more after a short delay (the rerender
+   * is async, and a section may re-attach from cache un-painted). Timers are
+   * tracked per source so rapid mode-switching can't pile them up, and cleared on
+   * unload.
+   */
+  private scheduleHeal(sourcePath: string): void {
+    this.healReadingViews(sourcePath);
+    const prev = this.healTimers.get(sourcePath);
+    if (prev !== undefined) window.clearTimeout(prev);
+    const t = window.setTimeout(() => {
+      this.healTimers.delete(sourcePath);
+      this.healReadingViews(sourcePath);
+    }, 250);
+    this.healTimers.set(sourcePath, t);
+  }
+
+  /** Paint any unpainted anchored highlights into each open reading view of `sourcePath`. */
+  private healReadingViews(sourcePath: string): void {
+    const resolved = this.store.getResolved(sourcePath);
+    if (resolved.length === 0) return;
+    for (const leaf of this.app.workspace.getLeavesOfType(MARKDOWN_VIEW_TYPE)) {
+      const view = leaf.view;
+      if (!(view instanceof MarkdownView) || view.getMode() !== 'preview' || !view.file) continue;
+      if (this.resolveSourcePath(view.file.path) !== sourcePath) continue;
+      const container = view.containerEl.querySelector('.markdown-preview-view');
+      if (container instanceof HTMLElement) paintMissingHighlights(container, resolved);
+    }
   }
 
   /** The anchored highlight specs for a source (empty if none/orphaned). */
@@ -422,9 +469,11 @@ export default class MarginaliaPlugin extends Plugin implements SettingsHost {
     const specs = this.specsFor(sourcePath);
     if (view.getMode() === 'preview') {
       // Entering reading mode: force the post-processor to re-run so highlights
-      // paint over the (possibly cached, un-highlighted) preview DOM.
+      // paint over the (possibly cached, un-highlighted) preview DOM, then
+      // self-heal any the rerender missed (intermittent render/cache race).
       this.readingSig.set(sourcePath, specSignature(specs));
       if (specs.length > 0) view.previewMode.rerender(true);
+      this.scheduleHeal(sourcePath);
     } else {
       // Entering editing mode: the CM editor starts with no decorations.
       const cm = editorView(view.editor);

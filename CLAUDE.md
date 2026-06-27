@@ -460,6 +460,38 @@ slice is the whole quote). The `getSectionInfo`-null path still falls back to wh
 search. Offset-accurate reading-mode highlighting remains a **non-goal** (Design.md §7.2);
 CM6 is the authoritative path. Covered by `reading.test.ts` ("spans two block elements").
 
+**Soft-line-break painting — fixed (2026-06-26).** A quote spanning a **single source
+newline** (a *soft* break inside one paragraph, common in web clips) silently vanished in
+reading mode while Live Preview painted it fine. Root cause: `highlightFirstMatch` did a raw
+`concat.indexOf(needle)`, but the rendered text nodes keep the literal `\n` between them
+while `projectQuoteToText` had already collapsed the quote's whitespace to a space — so
+`"… notepad and …"` could never be found in `"… notepad\nand …"`. Fix: the painter now matches
+against a **whitespace-collapsed** projection of the text-node concatenation (`collapseWhitespace`,
+mirroring `projectQuoteToText`'s `\s+`→`' '`) with an index map back to raw offsets for the wrap.
+This is *not* the §6.5 resolver (that runs on source bytes and anchored fine — the highlight
+was `anchored`, only the DOM painter missed it). Covered by `reading.test.ts` ("soft line
+break") and the real-Obsidian `mid-bold.e2e.ts` ("quote spanning a soft line break"), both
+teeth-verified (neutralize the collapse → the highlight stops painting).
+
+**Reading-mode self-heal — fixed (2026-06-27).** A highlight could end up *rendered but
+unpainted* in reading mode — `anchored`, its text in the DOM, yet zero `.mrg-highlight` spans —
+**intermittently**, when switching Live Preview ↔ Reading on a long note. Root cause is the
+reading render lifecycle: `previewMode.rerender(true)` clears a section and Obsidian re-attaches
+cached sections without reliably re-running the post-processor, so the per-section painter
+sometimes never paints that section (a timing/cache race, not a matching bug — `getResolved` is
+atomic, so the data is always present). Fix: `main.ts#healReadingViews` re-runs an idempotent
+whole-preview painter (`reading.ts#paintMissingHighlights`) after render-affecting events
+(`repaint`, mode flip) via `scheduleHeal` (immediate + one deferred pass; timers tracked per
+source, cleared on unload). `paintMissingHighlights` paints only anchored highlights with **no**
+span yet, matching the whole projected quote across the *entire* `.markdown-preview-view` — which
+required `highlightFirstMatch` to insert a synthetic space at **block boundaries** (`nearestBlock`:
+different block ancestor → the paragraph break reads as a space) so a cross-paragraph quote matches
+when there's no section-scoped slice to lean on (the per-section post-processor passes one block as
+`root`, so it's a no-op there). Verified on real Obsidian (`reading-flaky.e2e.ts`): strip the
+spans to reproduce the exact symptom, run the heal, the highlight repaints (0 → 4 spans). The
+intermittent *race itself* could not be reproduced headless (clean vault, programmatic switching);
+the heal targets the observable symptom and recovers it deterministically.
+
 **Translation-overlay interop — fixed (2026-06-23).** The *Immersive Translate* plugin
 injects translated text into the reading-mode DOM as `<font class="immersive-translate-target-
 wrapper">` nodes (and `immersive-translate-target-*` variants) appended after each original

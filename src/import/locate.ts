@@ -22,6 +22,7 @@
  */
 import type { Range } from '@/model/types';
 import { bodyStart } from '@/text/frontmatter';
+import { balanceEmphasisRange } from '@/text/emphasis';
 
 /** Markdown markers that carry styling/structure, not rendered text. */
 const MARKER_CHARS = new Set(['*', '_', '`', '#', '>', '|', '~']);
@@ -145,5 +146,10 @@ export function locateMark(source: string, text: string): Range | null {
   const { norm, off } = projectSource(source.slice(base));
   const i = norm.join('').indexOf(needle);
   if (i === -1) return null;
-  return { from: base + off[i], to: base + off[i + needle.length - 1] + 1 };
+  const from = base + off[i];
+  const to = base + off[i + needle.length - 1] + 1;
+  // Keep a wrapping `**bold**`/`*italic*`/`` `code` `` delimiter with its span
+  // so the rendered quote isn't left unbalanced (Design.md §15.2). Shared with
+  // the manual select-and-mark path via `text/emphasis` so they agree.
+  return balanceEmphasisRange(source, from, to, base);
 }

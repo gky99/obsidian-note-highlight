@@ -35,6 +35,7 @@ import { annotatesLink, resolveAnnotates, sidecarPathForSource } from '@/obsidia
 import { mergeResolved, pickPrimary } from './merge';
 import { normalize, normalizeQuote, quoteHash } from '@/text/normalize';
 import { bodyStart } from '@/text/frontmatter';
+import { balanceEmphasisRange } from '@/text/emphasis';
 import { contentHash } from '@/text/hash';
 import type { MarginaliaSettings } from '@/settings';
 
@@ -587,17 +588,23 @@ export class AnnotationStore {
     color?: string,
   ): Promise<Annotation | null> {
     const sourceText = await this.app.vault.cachedRead(sourceFile);
-    const quote = tidyQuote(sourceText.slice(from, to));
-    if (normalizeQuote(quote).length === 0) {
-      new Notice('Marginalia: select some text to highlight.');
-      return null;
-    }
 
     // The YAML frontmatter is metadata, not annotatable body text — and a highlight
     // anchored there can't be re-resolved or painted (§6.5). Refuse rather than
     // create one that would immediately orphan.
-    if (from < bodyStart(sourceText)) {
+    const base = bodyStart(sourceText);
+    if (Math.min(from, to) < base) {
       new Notice('Marginalia: highlight body text, not the note properties.');
+      return null;
+    }
+
+    // Grow the range over any wrapping emphasis delimiter so a selection that
+    // starts at the bold *content* (Live Preview conceals the `**`) still stores a
+    // balanced quote — same rule the importer applies (Design.md §15.2).
+    ({ from, to } = balanceEmphasisRange(sourceText, from, to, base));
+    const quote = tidyQuote(sourceText.slice(from, to));
+    if (normalizeQuote(quote).length === 0) {
+      new Notice('Marginalia: select some text to highlight.');
       return null;
     }
 
@@ -634,12 +641,16 @@ export class AnnotationStore {
     const sourceText = await this.app.vault.cachedRead(sourceFile);
     const cache = this.app.metadataCache.getFileCache(sourceFile) ?? {};
 
+    const base = bodyStart(sourceText);
     const taken = this.takenIds(sourceFile.path);
     const accepted: { from: number; to: number }[] = [];
     const created: Annotation[] = [];
     for (const item of items) {
-      const from = Math.min(item.from, item.to);
-      const to = Math.max(item.from, item.to);
+      const lo = Math.min(item.from, item.to);
+      const hi = Math.max(item.from, item.to);
+      if (lo < base) continue; // never anchor into the frontmatter (§6.5)
+      // Same wrapping-delimiter balancing as the single-create + import paths.
+      const { from, to } = balanceEmphasisRange(sourceText, lo, hi, base);
       const quote = tidyQuote(sourceText.slice(from, to));
       if (normalizeQuote(quote).length === 0) continue;
       if (this.annotationAt(sourceFile.path, from, to)) continue;

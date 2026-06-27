@@ -10,7 +10,12 @@
  *    extension, §7.1).
  *  - {@link ANNO_LANGUAGE}: the `` ```anno `` code-block language token.
  */
-export { renderAnnoBlock, makeReadingHighlighter, ANNO_LANGUAGE } from './reading';
+export {
+  renderAnnoBlock,
+  makeReadingHighlighter,
+  ANNO_LANGUAGE,
+  paintMissingHighlights,
+} from './reading';
 
 // Pure helpers, exported for unit testing and reuse.
 export { projectQuoteToText, rangesOverlap, sectionSpan } from './project';

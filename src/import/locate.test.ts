@@ -14,14 +14,38 @@ describe('locateMark', () => {
     expectSpan('The quick brown fox.', 'quick brown', 'quick brown');
   });
 
-  it('matches across inline emphasis markers (internal markers stay in the span)', () => {
-    // The match begins at the first needle char, so a *leading* marker is excluded;
-    // markers between matched chars remain (the resolver normalizes them away).
-    const r = locateMark('a **bold** word', 'bold word');
-    expect(r).not.toBeNull();
-    const span = 'a **bold** word'.slice(r!.from, r!.to);
-    expect(span.startsWith('bold')).toBe(true);
-    expect(span).toContain('word');
+  it('includes a leading emphasis marker when the highlight starts at a styled span', () => {
+    // Reported bug: a highlight starting exactly at **bold** dropped the opening
+    // `**` while keeping the interior closing `**`, producing the unbalanced,
+    // broken quote `bold** word`. The opening marker must travel with the span.
+    expectSpan('a **bold** word', 'bold word', '**bold** word');
+  });
+
+  it('includes a trailing emphasis marker when the highlight ends at a styled span', () => {
+    // Symmetric case: the closing `**` sits just past the last matched char.
+    expectSpan('text **bold** here', 'text bold', 'text **bold**');
+  });
+
+  it('wraps a highlight that is exactly a styled word in its markers', () => {
+    expectSpan('see **bold** word', 'bold', '**bold**');
+  });
+
+  it('includes a leading italic marker', () => {
+    expectSpan('*italic* and more', 'italic and more', '*italic* and more');
+  });
+
+  it('includes surrounding code-span backticks', () => {
+    expectSpan('`code` runs here', 'code runs', '`code` runs');
+  });
+
+  it('keeps interior emphasis markers across a multi-span match', () => {
+    expectSpan('**bold** and *italic*', 'bold and italic', '**bold** and *italic*');
+  });
+
+  it('does not grab the opening marker of a following span', () => {
+    // `word*italic*`: the highlight ends at "word"; the `*` after it opens the
+    // next span, so pulling it in would create the unbalanced `word*`.
+    expectSpan('see word*italic* now', 'see word', 'see word');
   });
 
   it('matches across a line wrap (whitespace removed)', () => {

@@ -8,7 +8,7 @@
 import { describe, it, expect } from 'vitest';
 import type { MarkdownPostProcessorContext } from 'obsidian';
 
-import { makeReadingHighlighter } from './reading';
+import { makeReadingHighlighter, paintMissingHighlights } from './reading';
 import type { AnnotationStore, ResolvedAnnotation } from '@/store/store';
 
 const SENTENCE = 'The quick brown fox jumps.';
@@ -91,6 +91,73 @@ describe('makeReadingHighlighter', () => {
     // The inner span stays nested inside <strong> (DOM not restructured).
     expect(el.querySelector('strong .mrg-highlight')?.textContent).toBe('brown fox');
     spans.forEach((s) => expect(s.getAttribute('data-anno-id')).toBe('a1'));
+  });
+
+  it('paints a quote spanning a soft line break (newline in a rendered text node)', () => {
+    // Real bug (2026-06-26): a highlight whose quote spans a single source
+    // newline — a soft break inside one paragraph — renders with a literal "\n"
+    // between the text nodes, but projectQuoteToText collapsed it to a space, so
+    // `concat.indexOf(needle)` could never match and the highlight silently
+    // vanished in reading mode (while editing/Live Preview painted it fine,
+    // since CM6 uses source offsets). The painter must match whitespace-
+    // insensitively.
+    const quote = '**A7 tear-off notepad**\nand a **0.5mm mechanical pencil** with me.';
+    const paint = makeReadingHighlighter(fakeStore([anchored(quote, 0, 0)]));
+    // Faithful soft-break DOM: the source newline survives as a "\n" in the text
+    // node after the first <strong>.
+    const el = richParagraph(
+      '<strong>A7 tear-off notepad</strong>\nand a <strong>0.5mm mechanical pencil</strong> with me.',
+    );
+    paint(el, ctx(null));
+
+    const painted = Array.from(el.querySelectorAll('.mrg-highlight'))
+      .map((s) => s.textContent)
+      .join('')
+      .replace(/\s+/g, ' ');
+    expect(painted).toBe('A7 tear-off notepad and a 0.5mm mechanical pencil with me.');
+  });
+
+  it('paints a highlight that starts inside a bold span (mid-span, within the bold)', () => {
+    // Selection "old text" begins partway into **bold text** (mid-word) and stays
+    // inside the bold; import stores the clean fragment quote "old text". With
+    // section info the painter projects the source slice and must wrap the run
+    // *inside* the <strong> so it renders bold AND highlighted.
+    const TEXT = 'a **bold text** z';
+    const paint = makeReadingHighlighter(fakeStore([anchored('old text', 5, 13)]));
+    const el = richParagraph('a <strong>bold text</strong> z');
+    paint(el, ctx({ text: TEXT, lineStart: 0, lineEnd: 0 }));
+
+    expect(el.querySelector('.mrg-highlight')?.textContent).toBe('old text');
+    // Stays nested inside <strong>: bold + highlighted, DOM not unwrapped.
+    expect(el.querySelector('strong .mrg-highlight')?.textContent).toBe('old text');
+  });
+
+  it('paints a mid-bold highlight that runs past the end of the bold (unbalanced quote)', () => {
+    // The hard case: a selection starting inside **bold** and ending after it.
+    // Import stores the *unbalanced* fragment quote "ld** rest" (opening ** is
+    // outside the range, closing ** is interior). projectQuoteToText strips the
+    // markers regardless of balance, so reading mode still paints "ld" (still
+    // bold) + " rest" (plain) as one contiguous highlight across the boundary.
+    const TEXT = 'a **bold** rest';
+    const items = [anchored('ld** rest', 6, 15)];
+
+    // Section-info path (the normal one in Obsidian): needle is the projected
+    // source slice "ld rest".
+    const withInfo = richParagraph('a <strong>bold</strong> rest');
+    makeReadingHighlighter(fakeStore(items))(withInfo, ctx({ text: TEXT, lineStart: 0, lineEnd: 0 }));
+    expect(
+      Array.from(withInfo.querySelectorAll('.mrg-highlight')).map((s) => s.textContent).join(''),
+    ).toBe('ld rest');
+    expect(withInfo.querySelector('strong .mrg-highlight')?.textContent).toBe('ld');
+
+    // Fallback path (no section info): the painter projects the stored quote
+    // itself — the path where an unbalanced quote could actually bite, if it did.
+    const noInfo = richParagraph('a <strong>bold</strong> rest');
+    makeReadingHighlighter(fakeStore(items))(noInfo, ctx(null));
+    expect(
+      Array.from(noInfo.querySelectorAll('.mrg-highlight')).map((s) => s.textContent).join(''),
+    ).toBe('ld rest');
+    expect(noInfo.querySelector('strong .mrg-highlight')?.textContent).toBe('ld');
   });
 
   it('wraps a quote whose projection spans a rendered link', () => {
@@ -194,6 +261,50 @@ describe('makeReadingHighlighter', () => {
     );
     paint(el, ctx({ text: SENTENCE, lineStart: 0, lineEnd: 0 }));
     expect(el.querySelector('.mrg-highlight')?.textContent).toBe('brown fox');
+  });
+
+  // --- self-heal (paintMissingHighlights), the rendered-but-unpainted recovery -
+  it('paintMissingHighlights paints an anchored highlight that has no span yet', () => {
+    // Simulates the race symptom: text is rendered, annotation anchored, but the
+    // per-section post-processor never painted it. The heal must paint it.
+    const el = richParagraph('a <strong>bold</strong> word here');
+    paintMissingHighlights(el, [anchored('**bold** word', 0, 0)]);
+    const painted = Array.from(el.querySelectorAll('.mrg-highlight'))
+      .map((s) => s.textContent)
+      .join('');
+    expect(painted).toBe('bold word');
+  });
+
+  it('paintMissingHighlights is idempotent (never double-paints)', () => {
+    const el = richParagraph('a <strong>bold</strong> word here');
+    const items = [anchored('**bold** word', 0, 0)];
+    paintMissingHighlights(el, items);
+    const n = el.querySelectorAll('.mrg-highlight').length;
+    paintMissingHighlights(el, items); // run again — already painted
+    expect(el.querySelectorAll('.mrg-highlight').length).toBe(n);
+  });
+
+  it('paintMissingHighlights heals a quote spanning a soft line break', () => {
+    const quote = '**A7 tear-off notepad**\nand a **0.5mm mechanical pencil** with me.';
+    const el = richParagraph(
+      '<strong>A7 tear-off notepad</strong>\nand a <strong>0.5mm mechanical pencil</strong> with me.',
+    );
+    paintMissingHighlights(el, [anchored(quote, 0, 0)]);
+    const painted = Array.from(el.querySelectorAll('.mrg-highlight'))
+      .map((s) => s.textContent)
+      .join('')
+      .replace(/\s+/g, ' ');
+    expect(painted).toBe('A7 tear-off notepad and a 0.5mm mechanical pencil with me.');
+  });
+
+  it('paintMissingHighlights skips orphaned annotations', () => {
+    const orphan = {
+      annotation: { id: 'o', quote: 'brown fox', comment: '', record: { id: 'o', status: 'exact' } },
+      result: { status: 'orphaned' },
+    } as unknown as ResolvedAnnotation;
+    const el = paragraph();
+    paintMissingHighlights(el, [orphan]);
+    expect(el.querySelector('.mrg-highlight')).toBeNull();
   });
 
   it('does not paint orphaned annotations', () => {

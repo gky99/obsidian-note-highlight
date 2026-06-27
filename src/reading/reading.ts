@@ -24,7 +24,7 @@
  */
 import type { MarkdownPostProcessorContext } from 'obsidian';
 
-import type { AnnotationStore } from '@/store/store';
+import type { AnnotationStore, ResolvedAnnotation } from '@/store/store';
 import type { Annotation } from '@/model/types';
 import { renderColor } from '@/color';
 
@@ -166,6 +166,38 @@ export function makeReadingHighlighter(
 }
 
 /**
+ * Self-heal an *already-rendered* reading-mode preview: paint any anchored
+ * highlight that has **no** `.mrg-highlight` span yet.
+ *
+ * The per-section post-processor ({@link makeReadingHighlighter}) is the primary
+ * painter, but reading mode re-renders and re-attaches cached sections on mode
+ * switches / scroll without always re-running post-processors, so a highlight can
+ * end up rendered-but-unpainted (anchored, text in the DOM, zero spans —
+ * intermittent, the 2026-06-27 report). This pass runs over the *whole* preview
+ * container (not one section), so it has no `getSectionInfo` to slice with — it
+ * matches the entire projected quote across the container's text nodes (which
+ * already paints across blocks, since `highlightFirstMatch` spans inline/element
+ * boundaries) and is **idempotent**: highlights that already have a span are
+ * skipped, and painted text is never re-wrapped. The caller re-runs it after
+ * render-affecting events (layout change, store change).
+ */
+export function paintMissingHighlights(container: HTMLElement, items: ResolvedAnnotation[]): void {
+  for (const { annotation, result } of items) {
+    if (result.status !== 'anchored') continue;
+    // Already painted somewhere in this preview → nothing to heal (ids are short
+    // base36, so they need no attribute-selector escaping).
+    if (container.querySelector(`.${HIGHLIGHT_CLASS}[data-anno-id="${annotation.id}"]`)) continue;
+    const needle = projectQuoteToText(annotation.quote);
+    if (needle.length === 0) continue;
+    try {
+      highlightFirstMatch(container, needle, annotation);
+    } catch {
+      // A failure for one highlight must never break the others / the note.
+    }
+  }
+}
+
+/**
  * Find the first occurrence of `needle` in the rendered text of `root` (skipping
  * text already inside a `.mrg-highlight`) and wrap it in highlight span(s).
  * Returns `true` if a wrap happened.
@@ -176,6 +208,16 @@ export function makeReadingHighlighter(
  * in reading mode. When the match straddles element boundaries, each contributing
  * text node gets its own `.mrg-highlight` span (sharing the same `data-anno-id`),
  * which renders as one contiguous highlight without restructuring the DOM.
+ *
+ * Matching is **whitespace-insensitive**: the needle is already whitespace-
+ * collapsed by {@link projectQuoteToText}, but the rendered text nodes are not —
+ * a quote spanning a *soft* line break (a single source newline inside one
+ * paragraph) renders with a literal "\n" between the nodes, so a raw `indexOf`
+ * of `"… notepad and …"` (space) in `"… notepad\nand …"` (newline) fails and the
+ * highlight silently vanished in reading mode while Live Preview (CM6 source
+ * offsets) painted it fine (fixed 2026-06-26). We therefore match against a
+ * whitespace-collapsed projection of the concatenation, keeping an index map
+ * back to the raw offsets the wrap needs.
  */
 function highlightFirstMatch(root: HTMLElement, needle: string, annotation: Annotation): boolean {
   const doc = root.ownerDocument;
@@ -189,18 +231,38 @@ function highlightFirstMatch(root: HTMLElement, needle: string, annotation: Anno
   // Snapshot every eligible text node with its [start, end) span in the
   // concatenated text. We collect first, then wrap: wrapping splits only the
   // node being wrapped, so the other snapshots stay valid.
+  //
+  // A *block* boundary between two text nodes (separate paragraphs / list items)
+  // contributes no character to the DOM text, but the rendered text reads as a
+  // space and the projected quote has one there (a newline collapsed to a space).
+  // So insert a synthetic space (no segment → never wrapped) when the nearest
+  // block ancestor changes, or a quote spanning a paragraph break can't match
+  // when matching across the whole preview (the self-heal path). Per-section
+  // painting passes a single block as `root`, so this is a no-op there.
   const segments: { node: Text; start: number; end: number }[] = [];
   let concat = '';
+  let prevBlock: Element | null = null;
+  let first = true;
   for (let n = walker.nextNode() as Text | null; n; n = walker.nextNode() as Text | null) {
     if (!n.nodeValue) continue;
+    const block = nearestBlock(n, root);
+    if (!first && block !== prevBlock) concat += ' ';
+    first = false;
+    prevBlock = block;
     const start = concat.length;
     concat += n.nodeValue;
     segments.push({ node: n, start, end: concat.length });
   }
 
-  const matchStart = concat.indexOf(needle);
-  if (matchStart === -1) return false;
-  const matchEnd = matchStart + needle.length;
+  // Collapse whitespace to match the projected needle, mapping each collapsed
+  // char back to its raw offset in `concat` (which `segments` is indexed in).
+  const { norm, rawIndex } = collapseWhitespace(concat);
+  const normStart = norm.indexOf(needle);
+  if (normStart === -1) return false;
+  // The needle is trimmed, so its first/last chars are non-whitespace and each
+  // maps to exactly one raw char — hence `+ 1` for the exclusive end.
+  const matchStart = rawIndex[normStart];
+  const matchEnd = rawIndex[normStart + needle.length - 1] + 1;
 
   let wrapped = false;
   for (const { node, start, end } of segments) {
@@ -211,6 +273,53 @@ function highlightFirstMatch(root: HTMLElement, needle: string, annotation: Anno
     wrapped = true;
   }
   return wrapped;
+}
+
+/** Block-level tags whose boundary reads as whitespace between rendered text. */
+const BLOCK_TAGS = new Set([
+  'P', 'DIV', 'LI', 'UL', 'OL', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
+  'BLOCKQUOTE', 'PRE', 'TABLE', 'THEAD', 'TBODY', 'TR', 'TD', 'TH',
+  'SECTION', 'ARTICLE', 'FIGURE', 'HR',
+]);
+
+/**
+ * The nearest block-level ancestor element of `node` within `root` (used to tell
+ * when two text nodes sit in different blocks). Falls back to `root` itself, so
+ * text directly under `root` — or under inline elements only — all shares one
+ * "block" and gets no synthetic separators.
+ */
+function nearestBlock(node: Node, root: HTMLElement): Element {
+  let cur: Element | null = node.parentElement;
+  while (cur && cur !== root) {
+    if (BLOCK_TAGS.has(cur.tagName)) return cur;
+    cur = cur.parentElement;
+  }
+  return root;
+}
+
+/**
+ * Collapse every run of whitespace in `s` to a single space, returning the
+ * collapsed string plus `rawIndex`, where `rawIndex[k]` is the offset in `s` of
+ * the k-th collapsed char (a whitespace run maps to the offset of its first
+ * char). Mirrors {@link projectQuoteToText}'s `\s+`→`' '` so a needle projected
+ * by it can be located in raw rendered text and mapped back for wrapping.
+ */
+function collapseWhitespace(s: string): { norm: string; rawIndex: number[] } {
+  let norm = '';
+  const rawIndex: number[] = [];
+  let i = 0;
+  while (i < s.length) {
+    if (/\s/.test(s[i])) {
+      norm += ' ';
+      rawIndex.push(i);
+      while (i < s.length && /\s/.test(s[i])) i++;
+    } else {
+      norm += s[i];
+      rawIndex.push(i);
+      i++;
+    }
+  }
+  return { norm, rawIndex };
 }
 
 /**
