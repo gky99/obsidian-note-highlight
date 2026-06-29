@@ -42,23 +42,12 @@
 }
 
 /* Transient flash applied after a forward jump (§8.1) — a soft accent glow inside
-   the highlight to draw the eye to where it landed. Works in both modes: an *inset*
+   the highlight to draw the eye to where it landed. Works in both modes (the CM6
+   flash mark in the editor, the painted highlight span in reading mode): an *inset*
    box-shadow fills over the element, so it layers on top of any existing highlight
    color rather than replacing it or drawing an outer ring. One flash that fades in
-   quickly, holds, then fades out (≈1.67s total); the JS clears the class afterwards.
-
-   The two modes differ in DOM shape, and the inset shadow only renders OVER a
-   background when it shares the element with it (a child's background paints over a
-   parent's inset shadow). Reading mode paints one span carrying BOTH classes
-   (`.mrg-highlight.mrg-flash`), so the accent sits over the highlight tint. Live
-   Preview is two nested CM6 decoration spans with `.mrg-flash` on the OUTER one
-   (`.mrg-flash > .mrg-highlight`) — there the outer inset shadow would paint UNDER
-   the inner highlight's translucent background and read as "no flash". So we run the
-   same animation on the inner highlight span too: its own inset shadow then paints
-   over its own background, matching reading mode. (When one element has both classes,
-   the descendant selector doesn't match it, so there's no double-flash.) */
-.mrg-flash,
-.mrg-flash .mrg-highlight {
+   quickly, holds, then fades out (≈1.67s total); the JS clears the class afterwards. */
+.mrg-flash {
   border-radius: 2px;
   animation: mrg-flash 1.67s ease 1;
 }
