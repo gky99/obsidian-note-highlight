@@ -627,6 +627,15 @@ first:
   flash; it now toggles `mrg-flash` on the painted `.mrg-highlight[data-anno-id]` spans
   (`src/reading/flash.ts`, retried while the section paints), while edit/Live-Preview keeps the
   CM6 flash decoration. Unit-tested (`reading/flash.test.ts`) + in-vault `jump-flash.e2e.ts`.
+  - **Live-Preview flash layering fix (2026-06-29).** The inset box-shadow renders over its
+    *own* element's background but **under** a child's. Reading mode flashes one span with both
+    classes (`.mrg-highlight.mrg-flash`) → accent on top ✓; Live Preview is two nested CM6 marks
+    with `.mrg-flash` **outside** `.mrg-highlight` → the accent painted *under* the highlight's
+    translucent tint and looked absent (it had been rendering under the tint since it shipped,
+    not a regression). Fix: animate the inner span too — `.mrg-flash, .mrg-flash .mrg-highlight`
+    in `styles.css` (the descendant selector can't match the single dual-class reading span, so
+    no double-flash). New in-vault `jump-flash-live-preview.e2e.ts` asserts the *visible* highlight
+    surface runs the animation (teeth-checked: drop the selector → fails).
 - **Sort highlights command** (Design.md §5.7): "Sort highlights in annotation file" reorders a
   sidecar's quote units into **source reading order, within each heading section** — every heading
   level is a fixed divider (conservative nesting), `anno` blocks + custom content stay put, a
