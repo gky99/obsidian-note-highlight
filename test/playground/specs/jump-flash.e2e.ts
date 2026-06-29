@@ -54,8 +54,14 @@ async function setup(): Promise<string | null> {
     );
 }
 
-/** Run the jump and poll for the flash class on the painted reading-mode span. */
-async function jumpAndDetectFlash(id: string): Promise<boolean> {
+/**
+ * Run the jump, confirm the flash class lands, then force a heal/sync pass (the very
+ * thing a real jump triggers: openFile → load → repaint → scheduleHeal) and confirm
+ * the flash SURVIVES it. The earlier version returned on first sighting, so it missed
+ * that `syncReadingHighlights`'s recolor clobbered `className` and stripped `mrg-flash`
+ * within the flash window — highlight intact, glow gone (the reading-mode "no flash").
+ */
+async function jumpAndDetectFlash(id: string): Promise<{ appeared: boolean; survivedHeal: boolean }> {
     return browser.executeObsidian(
         async ({ app }, file, annoId) => {
             const obs = app as any;
@@ -72,15 +78,31 @@ async function jumpAndDetectFlash(id: string): Promise<boolean> {
                 });
                 return el as HTMLElement | null;
             })();
-            if (!preview) return false;
+            if (!preview) return { appeared: false, survivedHeal: false };
+
+            const flashed = () => {
+                const span = preview!.querySelector(`.mrg-highlight[data-anno-id="${annoId}"]`);
+                return !!span && span.classList.contains("mrg-flash");
+            };
 
             // The flash class is applied (with a brief paint retry) and stays ~1.5s.
+            let appeared = false;
             for (let i = 0; i < 14; i++) {
-                const span = preview.querySelector(`.mrg-highlight[data-anno-id="${annoId}"]`);
-                if (span && span.classList.contains("mrg-flash")) return true;
+                if (flashed()) {
+                    appeared = true;
+                    break;
+                }
                 await new Promise((r) => setTimeout(r, 100));
             }
-            return false;
+
+            // Force the heal/sync pass that a jump triggers, then check the flash is
+            // STILL on the span (the recolor must not strip it). store.load → onChange
+            // → repaint → scheduleHeal → syncReadingHighlights (immediate + deferred).
+            const plugin = obs.plugins.plugins["marginalia"];
+            const tfile = obs.vault.getAbstractFileByPath(file);
+            await plugin.store.load(tfile);
+            await new Promise((r) => setTimeout(r, 250)); // let the deferred heal fire too
+            return { appeared, survivedHeal: flashed() };
         },
         FILE,
         id,
@@ -88,7 +110,7 @@ async function jumpAndDetectFlash(id: string): Promise<boolean> {
 }
 
 describe("jump flash (reading mode)", function () {
-    it("flashes the painted highlight span when jumping in reading mode", async function () {
+    it("flashes the painted highlight span and the flash survives a heal pass", async function () {
         const id = await setup();
         expect(id).not.toBeNull();
         // The highlight must paint before the jump can flash it.
@@ -109,7 +131,8 @@ describe("jump flash (reading mode)", function () {
             { timeout: 8000, interval: 250, timeoutMsg: "highlight never painted in reading mode" },
         );
 
-        const flashed = await jumpAndDetectFlash(id as string);
-        expect(flashed).toBe(true);
+        const r = await jumpAndDetectFlash(id as string);
+        expect(r.appeared).toBe(true);
+        expect(r.survivedHeal).toBe(true); // the bug: the heal's recolor stripped mrg-flash
     });
 });

@@ -234,7 +234,17 @@ export function syncReadingHighlights(container: HTMLElement, items: ResolvedAnn
 /** Paint a highlight span's color (className + inline `#hex` bg) — mirrors {@link wrapRange}. */
 function colorHighlightSpan(span: HTMLElement, color: string | undefined): void {
   const render = renderColor(color);
-  span.className = render.className ? `${HIGHLIGHT_CLASS} ${render.className}` : HIGHLIGHT_CLASS;
+  // Swap ONLY the color token class — do not reassign `className` wholesale, which
+  // would strip transient classes the span legitimately carries, notably the
+  // post-jump `mrg-flash` glow (reading mode has no CM6 decoration, so it rides on
+  // this very span). A heal/sync pass fires within the flash window on a jump, so a
+  // clobber here drops the glow while the highlight survives (the reading-mode "no
+  // flash" bug). Keep `mrg-highlight` + anything else; replace `mrg-color-*` only.
+  span.classList.add(HIGHLIGHT_CLASS);
+  for (const cls of Array.from(span.classList)) {
+    if (cls.startsWith('mrg-color-')) span.classList.remove(cls);
+  }
+  if (render.className) span.classList.add(render.className);
   // A built-in token carries no inline background; an arbitrary `#hex` does. Setting
   // '' clears a stale hex when recoloring from a hex to a token.
   span.style.backgroundColor = render.background ?? '';

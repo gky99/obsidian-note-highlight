@@ -376,4 +376,23 @@ describe('syncReadingHighlights', () => {
     expect(el.querySelector('.mrg-highlight')).toBe(before);
     expect(el.querySelectorAll('.mrg-highlight').length).toBe(1);
   });
+
+  it('preserves a transient `mrg-flash` class when recoloring in place', () => {
+    // The post-jump flash adds `mrg-flash` to the painted span (reading mode has no
+    // CM6 decoration). A heal/sync pass fires within the ~1.67s flash window (the
+    // jump's openFile → load → repaint → scheduleHeal deferred pass), so the recolor
+    // must keep `mrg-flash` — clobbering `className` strips it and the glow vanishes
+    // while the highlight itself stays (the 2026-06-29 reading-mode "no flash" report).
+    const el = paragraph();
+    paintMissingHighlights(el, [anchored('quick', 0, 0, 'yellow')]);
+    const span = el.querySelector<HTMLElement>('.mrg-highlight')!;
+    span.classList.add('mrg-flash');
+
+    syncReadingHighlights(el, [anchored('quick', 0, 0, 'yellow')]); // heal during flash
+
+    expect(el.querySelector<HTMLElement>('.mrg-highlight')).toBe(span); // same node
+    expect(span.classList.contains('mrg-flash')).toBe(true); // flash survives the recolor
+    expect(span.classList.contains('mrg-highlight')).toBe(true);
+    expect(span.classList.contains('mrg-color-yellow')).toBe(true); // still colored
+  });
 });

@@ -513,7 +513,15 @@ in-place painter does not; Live Preview is immune (CM6 decoration effect, no re-
 drop the rerender from the highlight path entirely.** `reading.ts#syncReadingHighlights` reconciles
 the rendered preview to the resolved set in place — unwrap spans whose highlight was deleted/
 orphaned, recolor changed spans (mutating the **same** DOM node, not rebuilding), paint newly-
-anchored ones (`paintMissingHighlights`). `repaint()` and the mode-flip `repaintView()` route
+anchored ones (`paintMissingHighlights`). **The recolor (`colorHighlightSpan`) swaps only the
+`mrg-color-*` token class via `classList`, never reassigning `className` wholesale** — because the
+reading-mode post-jump flash rides on this *same* span (`mrg-flash`, §8.1; reading mode has no
+separate CM6 decoration layer), and a jump fires this very reconcile **inside** the flash window
+(`openFile` → `file-open`/`active-leaf-change` → `store.load` → `repaint` → `scheduleHeal`'s
+deferred pass). A `className =` clobber stripped `mrg-flash` → the highlight stayed but the glow
+vanished, *reading-mode only* (the bug fixed 2026-06-29; Live Preview's flash is a separate CM6
+field, unaffected). Unit-tested (`reading.test.ts`: recolor preserves `mrg-flash`) + `jump-flash.e2e.ts`
+asserts the flash survives a forced heal (teeth-checked). `repaint()` and the mode-flip `repaintView()` route
 reading views through it via `scheduleHeal` (immediate + deferred pass, which also covers the
 render/cache race — so `healReadingViews` now syncs instead of only painting-missing, and no longer
 early-returns on an empty set, so deleting the last highlight unwraps its spans). The first e2e for
