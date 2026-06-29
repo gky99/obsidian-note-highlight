@@ -1,6 +1,6 @@
 {
   "name": "marginalia",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Obsidian plugin: PDF-style annotation for web clips and Markdown notes, with non-destructive sidecar storage and content-based re-anchoring.",
   "type": "module",
   "main": "main.js",
